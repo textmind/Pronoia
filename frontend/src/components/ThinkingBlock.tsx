@@ -9,7 +9,7 @@ export interface ThinkingSegment {
   text: string;
 }
 
-/** 思考过程（reasoning）：默认折叠，按参与 agent 分段展示。 */
+/** 接口返回的思考文本：默认展开，稳定的父级 key 保留用户折叠选择。 */
 export default function ThinkingBlock({
   segments,
   streaming,
@@ -32,6 +32,9 @@ export default function ThinkingBlock({
   return (
     <div className="rounded-card border border-edge bg-[#FBFAF8] overflow-hidden">
       <button
+        type="button"
+        aria-expanded={open}
+        aria-label={open ? "收起思考过程" : "展开思考过程"}
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left text-[12.5px] text-mute hover:bg-[#F4F2EE] transition-colors"
       >

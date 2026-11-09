@@ -32,6 +32,8 @@ def _profile(row: sqlite3.Row | Mapping[str, Any] | None, *, public: bool) -> di
     if row is None:
         return None
     item = dict(row)
+    from ..settings import read
+    item["configuration_revision"] = read("model-generation:" + str(item["id"]), 0)
     item["is_active"] = bool(item.get("is_active"))
     ref = str(item.get("secret_env_ref") or "")
     from .platform_default import is_platform_profile_id, matches_environment
@@ -57,7 +59,7 @@ def create_profile(data: Mapping[str, Any]) -> dict:
         data["provider"],
         data["base_url"],
         data["model_id"],
-        data["secret_env_ref"],
+        data.get("secret_env_ref") or "",
         int(data.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
         float(data.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS),
         data.get("thinking_mode") or "auto",
@@ -105,6 +107,7 @@ def get_profile(profile_id: str, *, public: bool = True) -> dict | None:
 
 
 def update_profile(profile_id: str, updates: Mapping[str, Any]) -> dict | None:
+    from ..settings import _LOCK, MODEL_FIELDS
     allowed = {
         "name", "provider", "base_url", "model_id", "secret_env_ref",
         "max_output_tokens", "timeout_seconds", "thinking_mode",
@@ -119,13 +122,19 @@ def update_profile(profile_id: str, updates: Mapping[str, Any]) -> dict | None:
         args.append(1 if key == "is_active" and bool(value) else 0 if key == "is_active" else value)
     if not fields:
         return get_profile(profile_id, public=True)
+    current = get_profile(profile_id, public=False) or {}
+    if any(key in updates and current.get(key) != updates[key] for key in MODEL_FIELDS):
+        fields.extend(["last_validated_at=NULL", "last_validation_status=NULL", "last_validation_message=NULL"])
     fields.append("updated_at=?")
     args.extend([db.now_iso(), profile_id])
-    with db._lock:
+    with _LOCK, db._lock:
         conn = db._get_conn()
         cursor = conn.execute(
             f"UPDATE ml_model_profiles SET {', '.join(fields)} WHERE id=?", tuple(args)
         )
+        if any(key in updates and current.get(key) != updates[key] for key in MODEL_FIELDS):
+            from ..settings import read, write
+            write("model-generation:" + profile_id, int(read("model-generation:" + profile_id, 0)) + 1)
         conn.commit()
     return get_profile(profile_id, public=True) if cursor.rowcount else None
 

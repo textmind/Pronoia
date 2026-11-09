@@ -41,8 +41,8 @@ class ModelProfileCreate(_CredentialInput):
 
     name: str = Field(..., min_length=1, max_length=120)
     provider: str = Field(..., min_length=1, max_length=80)
-    base_url: str = Field(..., min_length=1, max_length=4_000)
-    model_id: str = Field(..., min_length=1, max_length=200)
+    base_url: str = Field("", max_length=4_000)
+    model_id: str = Field("", max_length=200)
     secret_env_ref: Optional[str] = Field(None, max_length=256)
     max_output_tokens: int = Field(DEFAULT_MAX_OUTPUT_TOKENS, ge=32, le=200_000)
     timeout_seconds: float = Field(DEFAULT_TIMEOUT_SECONDS, gt=0, le=900)
@@ -57,7 +57,7 @@ class ModelProfileCreate(_CredentialInput):
     def validate_api_key(cls, value: SecretStr | None) -> SecretStr | None:
         return _clean_api_key(value, allow_blank=False)
 
-    @field_validator("name", "provider", "model_id", "currency")
+    @field_validator("name", "provider", "currency")
     @classmethod
     def strip_nonempty(cls, value: str) -> str:
         cleaned = value.strip()
@@ -74,8 +74,6 @@ class ModelProfileCreate(_CredentialInput):
         has_key = info.data.get("api_key") is not None
         if has_key and reference:
             raise ValueError("API Key 与环境变量引用只能填写一项")
-        if not has_key and not reference:
-            raise ValueError("请填写 API Key 或服务端密钥环境变量名")
         return reference
 
 
@@ -83,8 +81,8 @@ class ModelProfileUpdate(_CredentialInput):
 
     name: Optional[str] = Field(None, min_length=1, max_length=120)
     provider: Optional[str] = Field(None, min_length=1, max_length=80)
-    base_url: Optional[str] = Field(None, min_length=1, max_length=4_000)
-    model_id: Optional[str] = Field(None, min_length=1, max_length=200)
+    base_url: Optional[str] = Field(None, max_length=4_000)
+    model_id: Optional[str] = Field(None, max_length=200)
     secret_env_ref: Optional[str] = Field(None, max_length=256)
     max_output_tokens: Optional[int] = Field(None, ge=32, le=200_000)
     timeout_seconds: Optional[float] = Field(None, gt=0, le=900)
@@ -99,7 +97,7 @@ class ModelProfileUpdate(_CredentialInput):
     def validate_optional_api_key(cls, value: SecretStr | None) -> SecretStr | None:
         return _clean_api_key(value, allow_blank=True)
 
-    @field_validator("name", "provider", "model_id", "currency")
+    @field_validator("name", "provider", "currency")
     @classmethod
     def strip_optional_nonempty(cls, value: Optional[str]) -> Optional[str]:
         if value is None:

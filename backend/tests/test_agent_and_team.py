@@ -164,7 +164,7 @@ class TestAgentAndTeam(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(llm_mod, "get_client", return_value=fake_client),
             patch.object(llm_mod, "ensure_skills_loaded"),
-            patch.object(llm_mod, "tools_for_agent", return_value=[]),
+            patch.object(llm_mod, "tools_for_agent", return_value=[{"type": "function", "function": {"name": "shared_skill", "parameters": {"type": "object", "properties": {"symbol": {"type": "string"}}, "required": ["symbol"]}}}]),
         ):
             first_state, first_events = await one_agent("first")
             second_state, second_events = await one_agent("second")

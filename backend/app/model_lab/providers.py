@@ -40,14 +40,15 @@ class _TruncatedEmptyAnswer(ModelProviderError):
 
 def profile_snapshot(profile: Mapping[str, Any]) -> dict[str, Any]:
     """Freeze all execution-relevant fields without resolving the secret."""
-    return {
+    from .capabilities import connection_capabilities
+    return {"capabilities": profile.get("capabilities") or connection_capabilities(dict(profile)), **{
         key: profile.get(key)
         for key in (
             "id", "name", "provider", "base_url", "model_id", "secret_env_ref",
-            "max_output_tokens", "timeout_seconds", "thinking_mode",
+            "max_output_tokens", "timeout_seconds", "thinking_mode", "configuration_revision",
             "input_price_per_million", "output_price_per_million", "currency", "updated_at",
         )
-    }
+    }}
 
 
 def resolve_profile_secret(profile: Mapping[str, Any]) -> str:
@@ -226,8 +227,8 @@ def call_chat(
     }
 
 
-def validate_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
-    probe_tokens = 32
+def validate_profile(profile: Mapping[str, Any], *, probe_tokens: int = 2048) -> dict[str, Any]:
+    probe_tokens = min(max(32, probe_tokens), int(profile.get("max_output_tokens") or 2048))
     try:
         result = call_chat(
             profile,
@@ -241,7 +242,7 @@ def validate_profile(profile: Mapping[str, Any]) -> dict[str, Any]:
         result = {"model_id": exc.model_id, "latency_ms": exc.latency_ms, "finish_reason": "length"}
     probe_incomplete = result.get("finish_reason") == "length"
     return {
-        "ok": True,
+        "ok": not probe_incomplete,
         "latency_ms": result["latency_ms"],
         "model_id": result["model_id"],
         "status": "connected_probe_incomplete" if probe_incomplete else "connected",

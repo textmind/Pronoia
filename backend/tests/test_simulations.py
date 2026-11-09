@@ -3,7 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, ANY
 
 from fastapi.testclient import TestClient
 
@@ -20,6 +20,10 @@ class SimulationRoutesTests(unittest.TestCase):
             db._conn = None
         config.DB_PATH = str(Path(self.temporary.name) / "pronoia.db")
         db.init_db()
+        from app import settings
+        gateway = {"endpoint": "http://127.0.0.1:5010", "timeout_seconds": 15, "is_active": True}
+        gateway["validation"] = {"revision": settings.fingerprint(gateway), "ok": True, "message": "test"}
+        settings.write("simulation", gateway)
         self.case = db.create_case("simulation route test")
         self.graph = db.add_artifact(
             self.case["id"],
@@ -116,12 +120,12 @@ class SimulationRoutesTests(unittest.TestCase):
             self.assertEqual(self.client.get("/api/simulations/missing/followup").status_code, 404)
             proxy.assert_not_called()
             self.assertEqual(self.client.get(f"/api/simulations/{job['id']}/followup").status_code, 200)
-            proxy.assert_called_with("GET", "/v1/simulations/simjob_local_test/followup")
+            proxy.assert_called_with("GET", "/v1/simulations/simjob_local_test/followup", _connection=ANY)
             self.assertEqual(self.client.post(f"/api/simulations/{job['id']}/followup", json={}).status_code, 200)
-            proxy.assert_called_with("POST", "/v1/simulations/simjob_local_test/followup")
+            proxy.assert_called_with("POST", "/v1/simulations/simjob_local_test/followup", _connection=ANY)
             body = {"expected_revision": 0, "observation_id": "W1", "state": "pending"}
             self.assertEqual(self.client.post(f"/api/simulations/{job['id']}/followup/entries", json=body).status_code, 200)
-            proxy.assert_called_with("POST", "/v1/simulations/simjob_local_test/followup/entries", json=body)
+            proxy.assert_called_with("POST", "/v1/simulations/simjob_local_test/followup/entries", json=body, _connection=ANY)
 
     @staticmethod
     def completed_gateway(method, path, **kwargs):

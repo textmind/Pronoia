@@ -487,8 +487,8 @@ async def _run_expert_serial(
                         yield {"type": "token", "agent": agent_id, "delta": tail}
                         expert_state["content"] += tail
             except Exception as e:  # noqa: BLE001
-                yield {"type": "thinking", "agent": agent_id,
-                       "delta": f"\n[deep_researcher 导出图谱失败: {type(e).__name__}: {e}]\n"}
+                yield {"type": "agent_step", "phase": "progress", "agent": agent_id,
+                       "note": f"导出证据图失败：{type(e).__name__}"}
         yield {"type": "agent_step", "phase": "agent_done", "agent": agent_id,
                "note": _short_summary(findings)}
         yield {"type": "agent_findings", "agent": agent_id, "findings": findings[:600],
@@ -877,8 +877,8 @@ async def run_team(
 
     plan: list[dict] = []
     try:
-        yield {"type": "thinking", "agent": "router",
-               "delta": "正在拆解研究任务，规划专家分工…"}
+        yield {"type": "agent_step", "phase": "progress", "agent": "router",
+               "note": "正在拆解研究任务，规划专家分工…"}
         plan_json = await complete_json(
             system_prompt("router") + "\n\n" + PLANNER_INSTRUCTION,
             f"用户问题：{question}{history_ctx}",
@@ -957,8 +957,8 @@ async def run_team(
     team_graph: EvidenceGraph | None = None
     total_experts = len(plan)
     for ei, p in enumerate(plan):
-        yield {"type": "thinking", "agent": "router",
-               "delta": f"正在调度第 {ei+1}/{total_experts} 位专家：{AGENTS.get(p['agent'], {}).get('name', p['agent'])}…"}
+        yield {"type": "agent_step", "phase": "progress", "agent": "router",
+               "note": f"正在调度第 {ei+1}/{total_experts} 位专家：{AGENTS.get(p['agent'], {}).get('name', p['agent'])}…"}
         is_deep_researcher = p["agent"] == "deep_researcher"
         if is_deep_researcher:
             # Keep this graph alive through the Navigator's verification pass.
@@ -1097,8 +1097,8 @@ async def run_team(
                     f"；Navigator 审计发现 {payload['audit']['summary']['total_findings']} 项待处理。")
             findings["deep_researcher"] = (findings.get("deep_researcher", "") + tail).strip()
         except Exception as e:  # noqa: BLE001
-            yield {"type": "thinking", "agent": "deep_researcher",
-                   "delta": f"\n[最终证据图导出失败: {type(e).__name__}: {e}]\n"}
+            yield {"type": "agent_step", "phase": "progress", "agent": "deep_researcher",
+                   "note": f"导出最终证据图失败：{type(e).__name__}"}
 
     # ---------------------------------------------------------- 3) synthesize
     # 信号路由：调用 Tier 1 analyzer 产出结构化 scorecard，注入 synthesize prompt
@@ -1210,8 +1210,8 @@ async def run_team(
     if draft and not skip_verify:
         try:
             evidence = _evidence_digest(state["tool_trace"])
-            yield {"type": "thinking", "agent": "verifier",
-                   "delta": "正在复核研究结论的事实性与逻辑一致性…"}
+            yield {"type": "agent_step", "phase": "progress", "agent": "verifier",
+                   "note": "正在复核研究结论的事实性与逻辑一致性…"}
             verdict_json = await complete_json(
                 system_prompt("verifier"),
                 f"【分析草稿】\n{draft[:4000]}\n\n【证据摘要（工具调用记录）】\n{evidence}",
@@ -1248,7 +1248,7 @@ async def run_team(
             async for ev in run_agent("router", fix_messages,
                                       agent_def={**get_agent("router"), "skills": []},
                                       state=fix_state, artifact_store=artifact_store,
-                                      max_rounds=1, emit_thinking=False):
+                                      max_rounds=1):
                 if ev.get("type") == "token":
                     delta = ev["delta"]
                     # 兜底：若 LLM 仍以 ## 复核修正 开头，剥掉首个重复标题

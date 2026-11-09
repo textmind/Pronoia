@@ -25,11 +25,14 @@ def create_case(req: CreateCaseRequest):
 
 @router.get("/{case_id}")
 def get_case(case_id: str):
+    from .chat import _ACTIVE_RUNS, _ACTIVE_DETAILS
     case = db.get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="case not found")
     return {
         "case": case,
+        "generating": case_id in _ACTIVE_RUNS,
+        "active_run": _ACTIVE_DETAILS.get(case_id),
         "messages": db.list_messages(case_id),
         "artifacts": db.list_artifacts(case_id),
     }
@@ -37,6 +40,9 @@ def get_case(case_id: str):
 
 @router.delete("/{case_id}")
 def delete_case(case_id: str):
+    from .chat import _ACTIVE_RUNS
+    if case_id in _ACTIVE_RUNS and not _ACTIVE_RUNS[case_id].done():
+        raise HTTPException(409, detail={"code": "RESEARCH_BUSY", "message": "请先停止正在生成的研究，再删除案例"})
     if not db.delete_case(case_id):
         raise HTTPException(status_code=404, detail="case not found")
     return {"ok": True}
@@ -52,6 +58,8 @@ def pin_artifact(case_id: str, artifact_id: str):
 
 @router.post("/{case_id}/report")
 async def generate_report(case_id: str):
+    from ..settings import require_model
+    require_model()
     case = db.get_case(case_id)
     if not case:
         raise HTTPException(status_code=404, detail="case not found")

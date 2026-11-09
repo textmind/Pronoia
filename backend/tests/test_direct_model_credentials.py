@@ -149,7 +149,7 @@ def test_legacy_environment_key_and_switching_credentials_remain_supported(direc
 
 
 @pytest.mark.parametrize("updates", [
-    {"api_key": None}, {"api_key": " "}, {"api_key": KEY_ONE + "\ninside"},
+    {"api_key": " "}, {"api_key": KEY_ONE + "\ninside"},
     {"api_key": KEY_ONE * 700}, {"api_key": 1234},
     {"secret_env_ref": ENV_REF}, {"secret_env_ref": "local-model:" + "a" * 32},
     {"unexpected_credential": KEY_TWO},
@@ -237,6 +237,10 @@ def test_old_snapshot_and_validation_errors_are_redacted(direct_client: TestClie
 
 def test_web_key_can_be_selected_as_default(direct_client: TestClient):
     profile = create_direct(direct_client)
+    from app import settings
+    from app.model_lab import repository
+    assert direct_client.post(f"/api/model-lab/profiles/{profile['id']}/set-default").status_code == 409
+    settings.record_model_validation(repository.get_profile(profile["id"], public=False), True, "synthetic verification")
     response = direct_client.post(f"/api/model-lab/profiles/{profile['id']}/set-default")
     assert response.status_code == 200, response.text
     assert response.json()["default_profile_id"] == profile["id"]
@@ -254,7 +258,10 @@ def test_default_llm_uses_web_key_and_rotation_does_not_reuse_old_client(
 
     profile = create_direct(direct_client)
     selected = direct_client.post(f"/api/model-lab/profiles/{profile['id']}/set-default")
-    assert selected.status_code == 200
+    assert selected.status_code == 409
+    from app import settings
+    settings.record_model_validation(repository.get_profile(profile["id"], public=False), True, "synthetic verification")
+    assert direct_client.post(f"/api/model-lab/profiles/{profile['id']}/set-default").status_code == 200
     frozen = profile_snapshot(repository.get_profile(profile["id"], public=False))
     monkeypatch.setattr(model_endpoint_security, "validate_runtime_model_endpoint", lambda *_a, **_k: None)
     monkeypatch.setattr(llm, "_profile_clients", {})

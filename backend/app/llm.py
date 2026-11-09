@@ -11,6 +11,7 @@ import json
 import re
 import threading
 import time
+import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -65,23 +66,30 @@ async def _stream_with_hard_timeout(stream):
     """
     ts = resolve_runtime_target().timeout_seconds
     iterator = stream.__aiter__()
-    if not ts or ts <= 0:
-        async for chunk in iterator:
-            yield chunk
-        return
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + ts
-    while True:
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            raise asyncio.TimeoutError(
-                f"LLM streaming round exceeded {ts:.0f}s"
-            )
-        try:
-            chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
-        except StopAsyncIteration:
+    try:
+        if not ts or ts <= 0:
+            async for chunk in iterator:
+                yield chunk
             return
-        yield chunk
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + ts
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(f"LLM streaming round exceeded {ts:.0f}s")
+            try:
+                chunk = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+            except StopAsyncIteration:
+                return
+            yield chunk
+    finally:
+        close = getattr(stream, "close", None)
+        if close:
+            try:
+                await asyncio.wait_for(close(), timeout=5)
+            except Exception:
+                pass
+
 @dataclass(frozen=True)
 class LLMRuntimeTarget:
     """Resolved transport for one logical request/run.
@@ -98,6 +106,8 @@ class LLMRuntimeTarget:
     secret_env_ref: Optional[str] = None
     max_output_tokens: int = DEFAULT_MAX_OUTPUT_TOKENS
     thinking_mode: str = "auto"
+    capabilities: dict = field(default_factory=dict)
+    revision: str = ""
 
 
 _runtime_override: ContextVar[Optional[LLMRuntimeTarget]] = ContextVar(
@@ -106,6 +116,8 @@ _runtime_override: ContextVar[Optional[LLMRuntimeTarget]] = ContextVar(
 
 
 def _target_from_profile(profile: dict[str, Any]) -> LLMRuntimeTarget:
+    from .model_lab.capabilities import connection_capabilities
+    from .settings import model_revision
     from .model_endpoint_security import validate_runtime_model_endpoint
     from .model_lab.providers import chat_completions_url, resolve_profile_secret
 
@@ -130,6 +142,8 @@ def _target_from_profile(profile: dict[str, Any]) -> LLMRuntimeTarget:
         secret_env_ref=str(profile.get("secret_env_ref") or "") or None,
         max_output_tokens=int(profile.get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS),
         thinking_mode=str(profile.get("thinking_mode") or "auto"),
+        capabilities=profile.get("capabilities") or connection_capabilities(profile),
+        revision=model_revision(profile),
     )
 
 
@@ -184,6 +198,27 @@ def redact_runtime_error(text: Any) -> str:
 
     target = _runtime_override.get()
     return redact_sensitive_text(text, target.api_key if target else config.LLM_API_KEY)
+
+
+def friendly_runtime_error(error: BaseException) -> str:
+    """Keep common provider failures actionable without echoing response bodies."""
+    code = _http_status_code(error)
+    reasons = {
+        401: "模型认证失败，请在设置中检查 API Key 并重新验证。",
+        403: "模型服务拒绝访问，请检查密钥权限和模型访问权限。",
+        404: "模型或 API 地址不存在，模型可能已下线；请在设置中检查 API URL 和模型 ID。",
+        429: "模型服务限流或额度不足，请检查服务商配额后重试。",
+    }
+    if code in reasons:
+        return reasons[code]
+    if code is not None and code >= 500:
+        return "模型服务暂时不可用，请稍后重试。"
+    chain = _exception_chain(error)
+    if any(isinstance(item, (TimeoutError, httpx.TimeoutException)) or "timeout" in type(item).__name__.lower() for item in chain):
+        return "模型响应超时，请检查网络或在设置中调整超时后重新验证。"
+    if any(isinstance(item, httpx.ConnectError) or "connection" in type(item).__name__.lower() for item in chain):
+        return "无法连接模型服务，请检查 API URL、网络和代理设置。"
+    return redact_runtime_error(f"{type(error).__name__}: {error}")
 
 
 @contextmanager
@@ -404,6 +439,7 @@ async def run_agent(
         configured_skills if configured_skills is not None else agent_id
     )
     client = get_client()
+    invocation_id = uuid.uuid4().hex
     consecutive_failures: dict[str, int] = {}
 
     # 单轮（一次 agent 运行）内的技能结果备忘：同参重复调用（如 router
@@ -437,6 +473,7 @@ async def run_agent(
 
 
     for round_no in range(1, max_rounds + 1):
+        round_meta = {"round_id": f"{invocation_id}:{round_no}", "round": round_no}
         state["rounds"] = round_no
         kwargs: dict[str, Any] = {
             **_request_options(),
@@ -448,7 +485,7 @@ async def run_agent(
         if tools:
             kwargs["tools"] = tools
         if config.AGENT_MAX_TOKENS > 0:
-            kwargs["max_tokens"] = config.AGENT_MAX_TOKENS
+            kwargs["max_tokens"] = output_token_limit(config.AGENT_MAX_TOKENS)
         _llm_t0 = time.time()
         tc_acc: dict[int, dict] = {}
         saw_content = False
@@ -471,10 +508,12 @@ async def run_agent(
                     if rc:
                         round_reasoning += rc
                     if rc and emit_thinking:
-                        yield {"type": "thinking", "agent": agent_id, "delta": rc}
+                        yield {"type": "thinking", "agent": agent_id, "delta": rc, **round_meta}
                     if delta.content:
                         saw_content = True
                         round_content += delta.content
+                        state["content"] += delta.content
+                        yield {"type": "token", "agent": agent_id, "delta": delta.content, **round_meta}
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
                             slot = tc_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
@@ -491,12 +530,14 @@ async def run_agent(
             except BaseException as error:  # noqa: BLE001
                 if (
                     transport_attempt >= 1
+                    or saw_content or bool(round_reasoning)
                     or not _is_retryable_stream_error(error)
                 ):
                     raise
                 await asyncio.sleep(0.5)
 
         tool_calls = [tc_acc[i] for i in sorted(tc_acc)]
+        yield {"type": "model_round", "agent": agent_id, "status": "completed", **round_meta}
         _llm_dur = time.time() - _llm_t0
         _llm_tag = " [VSLOW]" if _llm_dur > 15 else (" [SLOW]" if _llm_dur > 5 else "")
         _tc_names = ",".join(t["name"] for t in tool_calls) if tool_calls else "-"
@@ -513,35 +554,39 @@ async def run_agent(
         )
         if not tool_calls:
             # 最终答复轮（token 已流式发出）
-            if round_content:
-                state["content"] += round_content
-                yield {"type": "token", "agent": agent_id, "delta": round_content}
             break
 
         # 有 tool_calls：执行技能并继续循环
         messages.append({
             "role": "assistant",
-            "content": None,
+            "content": round_content or None,
             "tool_calls": [
                 {"id": t["id"] or f"call_{round_no}_{i}", "type": "function",
                  "function": {"name": t["name"], "arguments": t["arguments"] or "{}"}}
                 for i, t in enumerate(tool_calls)
             ],
         })
-        if round_reasoning and "extra_body" in kwargs:
+        if round_reasoning:
             # Official DeepSeek thinking tool calls require the earlier
             # reasoning on the next request, even when the UI hides thinking.
             messages[-1]["reasoning_content"] = round_reasoning
         for i, t in enumerate(tool_calls):
             tc_id = t["id"] or f"call_{round_no}_{i}"
             name = t["name"]
+            argument_error = None
             try:
                 args = json.loads(t["arguments"]) if t["arguments"] else {}
-            except json.JSONDecodeError:
+                from .skills.registry import validate_tool_arguments
+                allowed = {tool["function"]["name"]: tool["function"]["parameters"] for tool in tools}
+                if name not in allowed:
+                    raise ValueError("此专家未获准使用该工具，请选择提供的工具")
+                validate_tool_arguments({**allowed[name], "type": "object"}, args)
+            except (json.JSONDecodeError, ValueError, TypeError) as exc:
                 args = {}
+                argument_error = "工具参数无效，请按工具定义修正：" + str(exc)[:250]
             yield {"type": "tool_call", "agent": agent_id, "id": tc_id,
                    "skill": name, "args": args}
-            result = await _exec_skill_memo(name, args)
+            result = {"ok": False, "error": argument_error} if argument_error else await _exec_skill_memo(name, args)
 
             artifact_ids: list[str] = []
             reused = bool(result.get("_team_shared"))
@@ -591,6 +636,7 @@ async def run_agent(
             })
         repeated_failure_skill = next((skill for skill, count in consecutive_failures.items() if count >= 3), None)
         if repeated_failure_skill:
+            round_meta = {"round_id": f"{invocation_id}:{round_no + 1}", "round": round_no + 1}
             summary_kwargs: dict[str, Any] = {
                 **_request_options(),
                 "model": get_model_name(),
@@ -605,7 +651,7 @@ async def run_agent(
                 "max_tokens": output_token_limit(),
             }
             if config.AGENT_MAX_TOKENS > 0:
-                summary_kwargs["max_tokens"] = config.AGENT_MAX_TOKENS
+                summary_kwargs["max_tokens"] = output_token_limit(config.AGENT_MAX_TOKENS)
             summary_stream = await _create_with_hard_timeout(
                 client.chat.completions.create(**summary_kwargs)
             )
@@ -615,15 +661,17 @@ async def run_agent(
                 delta = chunk.choices[0].delta
                 rc = getattr(delta, "reasoning_content", None)
                 if rc and emit_thinking:
-                    yield {"type": "thinking", "agent": agent_id, "delta": rc}
+                    yield {"type": "thinking", "agent": agent_id, "delta": rc, **round_meta}
                 if delta.content:
                     state["content"] += delta.content
-                    yield {"type": "token", "agent": agent_id, "delta": delta.content}
+                    yield {"type": "token", "agent": agent_id, "delta": delta.content, **round_meta}
+            yield {"type": "model_round", "agent": agent_id, "status": "completed", **round_meta}
             break
         # 继续下一轮
     else:
         # 达到最大轮数仍有 tool_calls —— 让模型做一次无工具总结
         state["truncated_by_rounds"] = True
+        round_meta = {"round_id": f"{invocation_id}:{max_rounds + 1}", "round": max_rounds + 1}
         summary_kwargs: dict[str, Any] = {
             **_request_options(),
             "model": get_model_name(),
@@ -632,7 +680,7 @@ async def run_agent(
             "max_tokens": output_token_limit(),
         }
         if config.AGENT_MAX_TOKENS > 0:
-            summary_kwargs["max_tokens"] = config.AGENT_MAX_TOKENS
+            summary_kwargs["max_tokens"] = output_token_limit(config.AGENT_MAX_TOKENS)
         stream = await _create_with_hard_timeout(client.chat.completions.create(**summary_kwargs))
         async for chunk in _stream_with_hard_timeout(stream):
             if not chunk.choices:
@@ -640,10 +688,11 @@ async def run_agent(
             delta = chunk.choices[0].delta
             rc = getattr(delta, "reasoning_content", None)
             if rc and emit_thinking:
-                yield {"type": "thinking", "agent": agent_id, "delta": rc}
+                yield {"type": "thinking", "agent": agent_id, "delta": rc, **round_meta}
             if delta.content:
                 state["content"] += delta.content
-                yield {"type": "token", "agent": agent_id, "delta": delta.content}
+                yield {"type": "token", "agent": agent_id, "delta": delta.content, **round_meta}
+        yield {"type": "model_round", "agent": agent_id, "status": "completed", **round_meta}
 
 
 # ------------------------------------------------------- one-shot helpers ---
@@ -946,7 +995,7 @@ async def complete_json_diagnostic(
     transient_attempts = 0
     output_attempts = 0
     request_no = 0
-    use_response_format = True
+    use_response_format = (resolve_runtime_target().capabilities.get("json") or {}).get("state") != "unsupported"
     format_fallback_used = False
     request_max_tokens = output_token_limit(max_tokens)
     max_tokens_initial = _token_budget_audit(request_max_tokens)
@@ -1084,6 +1133,8 @@ async def complete_json_diagnostic(
             ):
                 format_fallback_used = True
                 use_response_format = False
+                target = resolve_runtime_target()
+                target.capabilities["json"] = {"state": "unsupported"}
                 print(
                     f"LLM_JSON attempt={request_no} ok=false status=400 "
                     f"err={type(e).__name__} dur={_dur:.2f}s [FORMAT_FALLBACK]",
@@ -1179,14 +1230,29 @@ async def complete_json_with_web_search(
     max_output_tokens: int = DEFAULT_STRUCTURED_OUTPUT_TOKENS,
 ) -> Optional[dict]:
     """Responses API + Ark web_search, returning parsed JSON or None."""
+    target = resolve_runtime_target()
+    capability = target.capabilities.get("web_search") or {}
+    # A text-compatible endpoint is not evidence of Responses/search support.
+    # Unknown or rejected providers immediately use the ordinary data sources.
+    if capability.get("state") != "supported":
+        return None
     client = get_client()
-    resp = await client.responses.create(
-        model=get_model_name(),
-        instructions=system,
-        input=user,
-        tools=[{"type": "web_search", "max_keyword": max(1, min(int(max_keywords or 3), 10))}],
-        max_output_tokens=output_token_limit(max_output_tokens),
-    )
+    try:
+        resp = await asyncio.wait_for(client.responses.create(
+            model=get_model_name(),
+            instructions=system,
+            input=user,
+            tools=[{"type": "web_search", **({"max_keyword": max(1, min(int(max_keywords or 3), 10))} if capability.get("protocol") == "ark" else {})}],
+            max_output_tokens=output_token_limit(max_output_tokens),
+        ), timeout=min(20, target.timeout_seconds))
+    except Exception as exc:
+        code = _http_status_code(exc)
+        if code in {400, 404, 405, 422, 501}:
+            target.capabilities["web_search"] = {**capability, "state": "unsupported"}
+            from .model_lab.capabilities import record_capability
+            record_capability(target.profile_id, target.revision, "web_search", "unsupported", "原生搜索接口拒绝请求，已回退到内置资讯源")
+        publish(f"LLM_SEARCH fallback status={code or 'network'} err={type(exc).__name__}")
+        return None
     text = _response_output_text(resp)
     if not text:
         return None

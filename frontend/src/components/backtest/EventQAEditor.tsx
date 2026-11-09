@@ -109,7 +109,7 @@ export default function EventQAEditor({ value, onChange, profiles, platformDefau
       } else {
         const profile = profiles.find((item) => item.id === id && item.is_active);
         if (!profile) issues.push(`${label}连接已不可用`);
-        else if (!profile.secret_configured) issues.push(`${label}“${profile.name}”尚未配置 API Key`);
+        else if (!profile.configuration?.ready) issues.push(`${label}“${profile.name}”连接尚未验证，请前往设置`);
       }
     };
     if (value.variants.includes("pronoia") && !pronoiaModel?.available) issues.push("当前 Pronoia 回答模型尚未就绪");
@@ -121,7 +121,7 @@ export default function EventQAEditor({ value, onChange, profiles, platformDefau
   }, [value, loading, detailLoading, error, detailError, platformDefault, pronoiaModel, profiles]);
   useEffect(() => { onStatusChange(status); }, [status, onStatusChange]);
 
-  const profileOptions = profiles.filter((profile) => profile.is_active).map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.model_id}{!profile.secret_configured ? " · 密钥未配置" : ""}</option>);
+  const profileOptions = profiles.filter((profile) => profile.is_active).map((profile) => <option key={profile.id} value={profile.id} disabled={!profile.configuration?.ready}>{profile.name} · {profile.model_id} · {profile.configuration?.label || "未验证"}</option>);
   const toggleQuestion = (id: string) => onChange({ ...value, question_ids: value.question_ids.includes(id) ? value.question_ids.filter((item) => item !== id) : [...value.question_ids, id] });
 
   return <section id="create-event-qa" tabIndex={-1} className="overflow-hidden rounded-xl border border-violet/20 bg-card outline-none">

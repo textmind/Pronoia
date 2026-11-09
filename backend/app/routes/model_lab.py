@@ -5,6 +5,7 @@ import asyncio
 import re
 import sqlite3
 from typing import Any, Mapping
+from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, HTTPException, Query, status
@@ -96,7 +97,7 @@ def _profile_or_404(profile_id: str, *, public: bool = False) -> dict[str, Any]:
 
 
 def _validate_profile_endpoint(data: Mapping[str, Any]) -> None:
-    if "base_url" not in data:
+    if not data.get("base_url"):
         return
     try:
         validate_registered_model_endpoint(data.get("base_url"), label="模型 API")
@@ -124,6 +125,8 @@ def _profile_origin(value: Any) -> tuple[str, str, int | None]:
 @router.get("/profiles")
 def list_profiles(active_only: bool = False) -> dict[str, Any]:
     items = repo.list_profiles(active_only=active_only, public=True)
+    from ..settings import public_model
+    items = [public_model(item) for item in repo.list_profiles(active_only=active_only, public=False)]
     return _public({
         "items": items,
         "total": len(items),
@@ -219,12 +222,15 @@ def delete_profile(profile_id: str) -> dict[str, Any]:
 
 
 @router.post("/profiles/{profile_id}/validate")
-async def validate_profile_connection(profile_id: str) -> dict[str, Any]:
+async def validate_profile_connection(profile_id: str, probe_tokens: int = Query(2048, ge=32, le=16384)) -> dict[str, Any]:
     profile = _profile_or_404(profile_id, public=False)
+    from ..settings import record_model_validation, public_model
     try:
-        result = await asyncio.to_thread(validate_profile, profile)
-        public_profile = repo.record_validation(profile_id, ok=True, message=str(result.get("message") or "连接成功"))
-        return {**result, "profile": _public(public_profile)}
+        result = await asyncio.to_thread(validate_profile, profile, probe_tokens=probe_tokens)
+        accepted = record_model_validation(profile, bool(result.get("ok")), str(result.get("message") or "连接成功"))
+        if not accepted:
+            return {"ok": False, "message": "配置已修改，请重新验证"}
+        return {**result, "profile": _public(public_model(repo.get_profile(profile_id, public=False)))}
     except Exception as exc:  # noqa: BLE001
         # Provider errors are already bounded/redacted.  Do not expose the
         # environment-variable reference or any third-party response body.
@@ -239,12 +245,24 @@ async def validate_profile_connection(profile_id: str) -> dict[str, Any]:
         if secret_value:
             message = message.replace(secret_value, "[redacted]")
         message = _public(message, ())
-        public_profile = repo.record_validation(profile_id, ok=False, message=message)
+        record_model_validation(profile, False, message)
+        public_profile = public_model(repo.get_profile(profile_id, public=False))
         return {"ok": False, "message": message[:500], "profile": _public(public_profile)}
+
+
+@router.post("/profiles/{profile_id}/validate-capability")
+async def validate_connection_capability(profile_id: str, capability: Literal["tools", "json", "web_search"]):
+    from ..model_lab.capabilities import probe_capability
+    from ..settings import require_model, public_model
+    profile = require_model(profile_id)
+    result = await probe_capability(profile, capability)
+    return {**result, "profile": public_model(repo.get_profile(profile_id, public=False))}
 
 
 @router.post("/profiles/{profile_id}/set-default")
 def set_default_profile(profile_id: str) -> dict[str, Any]:
+    from ..settings import require_model
+    require_model(profile_id)
     profile = _profile_or_404(profile_id, public=False)
     if not profile.get("is_active"):
         raise HTTPException(status_code=409, detail="已停用的模型不能设为默认")
@@ -280,6 +298,9 @@ def _resolve_batch_inputs(payload: EvaluationBatchCreate) -> tuple[list[dict[str
     profiles: list[dict[str, Any]] = []
     for profile_id in payload.profile_ids:
         profile = _profile_or_404(profile_id, public=False)
+        if not payload.dry_run:
+            from ..settings import require_model
+            require_model(profile_id)
         if not profile.get("is_active"):
             raise HTTPException(status_code=409, detail=f"模型 {profile.get('name')} 已停用")
         if not payload.dry_run and not profile.get("secret_configured"):
@@ -326,6 +347,9 @@ def _resolve_batch_inputs(payload: EvaluationBatchCreate) -> tuple[list[dict[str
         resolved["questions"] = questions
         if payload.qa.scoring_mode in {"auto", "mixed"}:
             judge = _profile_or_404(str(payload.qa.judge_profile_id or ""), public=False)
+            if not payload.dry_run:
+                from ..settings import require_model
+                require_model(judge["id"])
             if not judge.get("is_active"):
                 raise HTTPException(status_code=409, detail="评分模型已停用")
             if not payload.dry_run and not judge.get("secret_configured"):
@@ -428,6 +452,14 @@ def get_batch(batch_id: str) -> dict[str, Any]:
 
 @router.post("/batches/{batch_id}/start")
 def start_batch(batch_id: str) -> dict[str, Any]:
+    from ..settings import require_model
+    batch = repo.get_batch(batch_id, include_tasks=True)
+    if batch and not (batch.get("scoring") or {}).get("dry_run"):
+        for task in batch.get("tasks") or []:
+            cfg = task.get("config") or {}
+            for key in ("profile_snapshot", "judge_profile_snapshot"):
+                if cfg.get(key):
+                    require_model(snapshot=cfg[key])
     ok, message = service.start_batch(batch_id)
     if not ok:
         if not repo.get_batch(batch_id):

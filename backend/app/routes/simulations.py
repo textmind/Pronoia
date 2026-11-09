@@ -60,11 +60,13 @@ class StartSimulationRequest(BaseModel):
 
 
 def _gateway(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+    connection = kwargs.pop("_connection", None) or {"endpoint": config.SIMULATION_GATEWAY_URL, "timeout_seconds": config.SIMULATION_GATEWAY_TIMEOUT}
     try:
         response = requests.request(
             method,
-            f"{config.SIMULATION_GATEWAY_URL}{path}",
-            timeout=config.SIMULATION_GATEWAY_TIMEOUT,
+            f"{connection['endpoint'].rstrip('/')}{path}",
+            timeout=connection["timeout_seconds"],
+            allow_redirects=False,
             **kwargs,
         )
     except requests.RequestException as error:
@@ -80,6 +82,10 @@ def _gateway(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
 
 def _public(job: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in job.items() if key != "request_payload"}
+
+
+def _job_connection(job: dict) -> dict:
+    return (job.get("request_payload") or {}).get("_gateway_connection") or {"endpoint": config.SIMULATION_GATEWAY_URL, "timeout_seconds": config.SIMULATION_GATEWAY_TIMEOUT}
 
 
 def _build_gateway_payload(
@@ -108,7 +114,7 @@ def _sync(job: dict[str, Any]) -> dict[str, Any]:
         job = db.get_simulation_job(job["id"]) or job
         if job["status"] in TERMINAL and (job["status"] != "completed" or job.get("artifact_id")):
             return job
-        remote = _gateway("GET", f"/v1/simulations/{job['gateway_job_id']}")
+        remote = _gateway("GET", f"/v1/simulations/{job['gateway_job_id']}", _connection=_job_connection(job))
         artifact_id = job.get("artifact_id")
         if remote.get("status") in {"completed", "partial"} and remote.get("result") and not artifact_id:
             request_payload = job["request_payload"]
@@ -165,13 +171,15 @@ def _schedule_sync(job_id: str) -> None:
 def start_simulation_service(
     case_id: str, request: StartSimulationRequest
 ) -> dict[str, Any]:
+    from ..settings import require_gateway
+    connection = require_gateway()
     payload, _ = _build_gateway_payload(case_id, request)
-    remote = _gateway("POST", "/v1/simulations", json=payload)
+    remote = _gateway("POST", "/v1/simulations", json=payload, _connection=connection)
     job = db.create_simulation_job(
         case_id,
         request.source_graph_artifact_id,
         remote,
-        {key: value for key, value in payload.items() if key != "evidence_graph"},
+        {**{key: value for key, value in payload.items() if key != "evidence_graph"}, "_gateway_connection": {"endpoint": connection["endpoint"], "timeout_seconds": connection["timeout_seconds"]}},
     )
     synced = _sync(job)
     if synced.get("status") not in TERMINAL:
@@ -186,8 +194,10 @@ def start_simulation(case_id: str, request: StartSimulationRequest):
 
 @router.post("/cases/{case_id}/simulations/preview")
 def preview_simulation(case_id: str, request: StartSimulationRequest):
+    from ..settings import require_gateway
+    connection = require_gateway()
     payload, _ = _build_gateway_payload(case_id, request)
-    return _gateway("POST", "/v1/simulations/preview", json=payload)
+    return _gateway("POST", "/v1/simulations/preview", json=payload, _connection=connection)
 
 
 @router.get("/simulations/{job_id}")
@@ -203,7 +213,7 @@ def cancel_simulation(job_id: str):
     job = db.get_simulation_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="simulation job not found")
-    remote = _gateway("POST", f"/v1/simulations/{job['gateway_job_id']}/cancel")
+    remote = _gateway("POST", f"/v1/simulations/{job['gateway_job_id']}/cancel", _connection=_job_connection(job))
     updated = db.update_simulation_job(
         job_id,
         status=remote.get("status", job["status"]),
@@ -220,7 +230,7 @@ def resume_simulation(job_id: str):
     job = db.get_simulation_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="simulation job not found")
-    remote = _gateway("POST", f"/v1/simulations/{job['gateway_job_id']}/resume")
+    remote = _gateway("POST", f"/v1/simulations/{job['gateway_job_id']}/resume", _connection=_job_connection(job))
     updated = db.update_simulation_job(
         job_id,
         status=remote.get("status", "queued"),
@@ -244,7 +254,7 @@ def _followup_proxy(job_id: str, method: str, suffix: str = "", **kwargs):
     job = db.get_simulation_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="simulation job not found")
-    return _gateway(method, f"/v1/simulations/{job['gateway_job_id']}/followup{suffix}", **kwargs)
+    return _gateway(method, f"/v1/simulations/{job['gateway_job_id']}/followup{suffix}", _connection=_job_connection(job), **kwargs)
 
 
 @router.get("/simulations/{job_id}/followup")

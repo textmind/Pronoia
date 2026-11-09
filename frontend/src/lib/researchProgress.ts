@@ -5,6 +5,9 @@ export function researchProgressParts(parts: Part[], pending: boolean): Part[] {
   const lastHypotheses = parts.reduce((last, part, i) =>
     part.type === "agent_step" && part.phase === "hypotheses" ? i : last, -1);
   return parts.flatMap((part, i): Part[] => {
+    if (!pending && part.type === "model_round" && part.status === "streaming") {
+      return [{ ...part, status: "interrupted" }];
+    }
     if (part.type === "agent_step" && part.phase === "hypotheses") {
       if (i !== lastHypotheses) return [];
       if (!pending && part.verdict === "running") {

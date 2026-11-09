@@ -23,6 +23,7 @@ import type {
 } from "../../types";
 import { cls } from "../../utils";
 import { QUESTION_LIBRARY_SELECTION_KEY, readQuestionLibrarySelection } from "./questionLibrarySelection";
+import { useTaskDraft } from "../../settingsClient";
 
 const INPUT = "w-full rounded-lg border border-edgeDark/80 bg-card px-3 py-2 text-[11px] text-ink outline-none transition placeholder:text-faint focus:border-violet/50 focus:ring-2 focus:ring-violet/10 disabled:cursor-not-allowed disabled:bg-edge/35 disabled:text-faint";
 
@@ -83,6 +84,9 @@ export default function ModelLabBatchComposer({ compact = false, predictionRequi
   const [dryRun, setDryRun] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  useTaskDraft("pronoia.model-lab-draft", { name, selectedProfiles, predictionEnabled, datasetId, horizon, qaEnabled, questionSetId, selectedQuestionIds, repeats, scoringMode, judgeProfileId, dryRun }, (draft) => {
+    setName(draft.name); setSelectedProfiles(draft.selectedProfiles); setPredictionEnabled(draft.predictionEnabled); setDatasetId(draft.datasetId); setHorizon(draft.horizon); setQaEnabled(draft.qaEnabled); setQuestionSetId(draft.questionSetId); setSelectedQuestionIds(draft.selectedQuestionIds); setRepeats(draft.repeats); setScoringMode(draft.scoringMode); setJudgeProfileId(draft.judgeProfileId); setDryRun(draft.dryRun);
+  });
 
   const load = async () => {
     setLoading(true);
@@ -199,6 +203,8 @@ export default function ModelLabBatchComposer({ compact = false, predictionRequi
     if (qaEnabled && variants.length === 0) issues.push("至少选择一种问答路径");
     if (needsJudge && !judgeProfileId) issues.push("自动评分需要选择评分模型");
     if (!dryRun) {
+      if (selectedProfiles.some((id) => !profiles.find((profile) => profile.id === id)?.configuration?.ready)) issues.push("被测模型尚未验证，请前往设置完成验证");
+      if (needsJudge && !profiles.find((profile) => profile.id === judgeProfileId)?.configuration?.ready) issues.push("评分模型尚未验证，请前往设置完成验证");
       const missingSecrets = selectedProfiles
         .map((id) => profiles.find((profile) => profile.id === id))
         .filter((profile): profile is ModelLabProfile => profile !== undefined && !profile.secret_configured)
@@ -253,6 +259,7 @@ export default function ModelLabBatchComposer({ compact = false, predictionRequi
         },
       };
       const batch = await api.modelLabCreateBatch(payload);
+      sessionStorage.removeItem("pronoia.model-lab-draft");
       setName("");
       onCreated?.(batch);
     } catch (reason) {
@@ -321,7 +328,7 @@ export default function ModelLabBatchComposer({ compact = false, predictionRequi
                   <button key={profile.id} type="button" onClick={() => toggleProfile(profile.id)} className={cls("rounded-lg border px-3 py-2.5 text-left transition", checked ? "border-violet/30 bg-violet-soft/45" : "border-edge bg-paper hover:border-edgeDark")}>
                     <div className="flex items-start justify-between gap-2"><span className="truncate text-[10.5px] font-semibold text-ink">{profile.name}</span>{checked ? <CheckCircle2 size={12} className="shrink-0 text-violet" /> : <CircleDashed size={12} className="shrink-0 text-faint" />}</div>
                     <p className="mt-1 truncate font-mono text-[8.5px] text-mute">{providerLabel(profile.provider)} · {profile.model_id}</p>
-                    <p className={cls("mt-1 text-[8px]", profile.secret_configured ? "text-jade" : "text-amber-700")}>{profile.secret_configured ? "API Key 已配置" : "API Key 未配置"}{profile.id === defaultProfileId ? " · 当前默认" : ""}</p>
+                    <p className={cls("mt-1 text-[8px]", profile.configuration?.ready ? "text-jade" : "text-amber-700")}>{profile.configuration?.label || "未验证"}{profile.id === defaultProfileId ? " · 当前默认" : ""}</p>
                   </button>
                 );
               })}

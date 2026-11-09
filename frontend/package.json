@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "test:simulation": "node --test tests/simulationPresentation.test.mjs tests/researchProgress.test.mjs",
+    "test:settings": "node --test tests/settings.test.mjs",
+    "test:research": "node --test tests/researchNavigation.test.mjs tests/thinkingStream.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

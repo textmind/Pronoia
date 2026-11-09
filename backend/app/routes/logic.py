@@ -279,6 +279,8 @@ def _regex_parse_horizon(text: str, now: _dt.datetime) -> dict | None:
 @router.post("/auto_check", response_model=LogicCheckResponse)
 async def auto_check(req: LogicCheckRequest) -> LogicCheckResponse:
     """一键深度验证：先看时间窗口，再决定立即验证 / 等待 / 取数判断。"""
+    from ..settings import require_model
+    require_model()
     ensure_skills_loaded()
     now = _now_shanghai()
     ran_at_iso = _iso(now)

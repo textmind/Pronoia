@@ -38,6 +38,8 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { useStore } from "../store";
+import { readTaskDraft, saveTaskDraft, clearTaskDraft } from "../lib/taskDrafts";
+import { settingsRequest } from "../settingsClient";
 import type {
   BTDataset,
   BTMetricDef,
@@ -337,6 +339,9 @@ export interface CreateDraft {
   external_api_ref: string;
   external_header_name: string;
   external_secret_env_ref: string;
+  external_connection_id?: string;
+  external_service_revision?: string;
+  external_connection_headers?: Record<string, string>;
   benchmark: string;
   date_from: string;
   date_to: string;
@@ -823,6 +828,8 @@ export function BacktestCreateModal({
   const validationSummaryRef = useRef<HTMLDivElement | null>(null);
   const submitLock = useRef(false);
   const serviceCredentialCache = useRef<{ signature: string; headers: Record<string, string> } | null>(null);
+  const draftKey = `pronoia.backtest-draft.${savedModelSetup?.saved_model_id || [initialType, initialEventAnalysisMode, initialExternalModelMode, initialQuantMode].join(".")}`;
+  const taskValues = { form, externalService, providedSource, activeStep, qaConfig, dateEdited, savedPredictionFilePath };
 
   useEffect(() => {
     if (!open) return;
@@ -868,6 +875,13 @@ export function BacktestCreateModal({
     setOracleFailure(null);
     setPreparedDataset(null);
     setDateEdited({ from: false, to: false });
+    const saved = readTaskDraft<typeof taskValues>(draftKey);
+    if (saved) {
+      setForm({ ...initialDraft, ...saved.form });
+      setExternalService({ ...defaultExternalService(), ...saved.externalService });
+      setProvidedSource(saved.providedSource); setActiveStep(saved.activeStep);
+      setQaConfig(saved.qaConfig); setDateEdited(saved.dateEdited); setSavedPredictionFilePath(saved.savedPredictionFilePath);
+    }
     setDatasetsLoading(true);
     setDatasetsErr(null);
     let alive = true;
@@ -982,7 +996,7 @@ export function BacktestCreateModal({
   const predictionProfile = savedPredictionModel ? profiles.find((profile) => profile.id === form.prediction_profile_id) : undefined;
   const variantProfile = savedModelSetup?.kind === "pronoia" && savedModelSetup.profile_id !== "__platform_default__" ? profiles.find((profile) => profile.id === savedModelSetup.profile_id) : undefined;
   const usesVariantProfile = savedModelSetup?.kind === "pronoia" && Boolean(savedModelSetup.profile_id) && savedModelSetup.profile_id !== "__platform_default__";
-  const platformModelInfo = usesVariantProfile ? variantProfile ? { available: variantProfile.secret_configured, name: variantProfile.name, model_id: variantProfile.model_id } : null : eventCapabilities?.platform_default ?? null;
+  const platformModelInfo = usesVariantProfile ? variantProfile ? { available: Boolean(variantProfile.configuration?.ready), name: variantProfile.name, model_id: variantProfile.model_id } : null : eventCapabilities?.platform_default ?? null;
   const qaModelsSummary = qaConfig.enabled ? qaConfig.variants.map((variant) => variant === "pronoia"
     ? `Pronoia（${platformModelInfo?.model_id ?? "基模待配置"}）`
     : profiles.find((profile) => profile.id === qaConfig.candidate_profile_id)?.name ?? "外部问答模型待选择").join("\n") || "尚未选择" : undefined;
@@ -1184,7 +1198,7 @@ export function BacktestCreateModal({
   }
   if (form.strategy_type === "event" && savedPredictionModel) {
     if (!predictionProfile) pushIssue({ id: "prediction-profile-missing", step: 2, message: "请选择一个已保存的模型连接", fieldId: "create-prediction-profile" });
-    else if (!predictionProfile.secret_configured) pushIssue({ id: "prediction-profile-secret", step: 2, message: "所选预测模型尚未配置 API Key", fieldId: "create-prediction-profile" });
+    else if (!predictionProfile.configuration?.ready) pushIssue({ id: "prediction-profile-secret", step: 2, message: "所选预测模型尚未验证，请前往设置", fieldId: "create-prediction-profile" });
   }
   if (form.strategy_type === "event" && platformPrediction && !platformModelInfo?.available) {
     pushIssue({ id: "platform-api-unavailable", step: 2, message: usesVariantProfile ? "此 Pronoia 模型保存的基模连接尚未就绪，请检查对应 API 连接" : eventCapabilities ? "Pronoia 的统一平台基模尚未就绪，请先配置平台默认模型" : "尚未读取到 Pronoia 的统一平台基模，请刷新模型连接", fieldId: "create-platform-model" });
@@ -1548,6 +1562,8 @@ export function BacktestCreateModal({
             input_contract: eventInputContract,
             endpoint: externalHttp ? externalService.endpoint.trim() : null,
             headers: serviceHeaders,
+            service_connection_id: externalService.connection_id,
+            service_revision: externalService.service_revision,
             ...(externalHttp ? { timeout_seconds: externalService.timeout_seconds } : {}),
             parameters: { evaluation_horizon: form.event_horizon },
           }
@@ -1594,14 +1610,20 @@ export function BacktestCreateModal({
               api_ref: form.external_api_ref.trim() || null,
               endpoint: form.external_api_ref.trim() || null,
               output_contract: "target_weight",
-              headers: form.external_secret_env_ref.trim()
+              service_connection_id: form.external_connection_id,
+              service_revision: form.external_service_revision,
+              headers: form.external_connection_headers ?? (form.external_secret_env_ref.trim()
                 ? { [form.external_header_name.trim() || "Authorization"]: `env:${form.external_secret_env_ref.trim()}` }
-                : {},
+                : {}),
               parameters: {
                 secret_env_ref: form.external_secret_env_ref.trim() || null,
                 stores_secret_value: false,
               },
             };
+      if (strategySpec.type === "api" && form.external_connection_id && !savedModelSetup) {
+        const spec = await settingsRequest<Record<string, unknown>>("/settings/services/" + form.external_connection_id + "/spec");
+        Object.assign(strategySpec, spec);
+      }
       const selectedStrategySpec: BTStrategySpec = savedModelSetup?.strategy_spec ? { ...savedModelSetup.strategy_spec,
         ...(savedQuantFile ? { path: savedPredictionFilePath.trim() } : {}),
         ...(quantForecast ? { parameters: { ...savedModelSetup.strategy_spec.parameters, horizon_bars: form.quant_forecast.horizon_bars } } : {}),
@@ -1676,6 +1698,7 @@ export function BacktestCreateModal({
           oracle_requested: usesManualEvent ? form.generate_oracle : undefined,
         },
       });
+      clearTaskDraft(draftKey);
       onClose();
     } catch (error) {
       setErrorMsg(error instanceof Error ? error.message : String(error));
@@ -1689,7 +1712,7 @@ export function BacktestCreateModal({
   if (!open) return null;
 
   return (
-    <div className={presentation === "inline" ? "w-full min-w-0" : "fixed inset-0 z-50 flex items-center justify-center bg-ink/35 p-3 backdrop-blur-[2px] sm:p-6"}>
+    <div onClickCapture={(event) => { if ((event.target as Element).closest('a[href^="/settings"]')) saveTaskDraft(draftKey, taskValues); }} className={presentation === "inline" ? "w-full min-w-0" : "fixed inset-0 z-50 flex items-center justify-center bg-ink/35 p-3 backdrop-blur-[2px] sm:p-6"}>
       <div
         role={presentation === "modal" ? "dialog" : "region"}
         aria-modal={presentation === "modal" ? true : undefined}
@@ -1930,9 +1953,9 @@ export function BacktestCreateModal({
                     </div>
 
                     {savedPredictionModel && !savedModelSetup && <div className="space-y-3">
-                        <Field label="事件预测模型连接" required error={validationIssues.find((issue) => issue.fieldId === "create-prediction-profile")?.message}><select id="create-prediction-profile" value={form.prediction_profile_id} disabled={profilesLoading} onChange={(event) => setForm({ ...form, prediction_profile_id: event.target.value })} className={INPUT_CLASS}><option value="">{profilesLoading ? "正在读取模型连接…" : profiles.length === 0 ? "尚无已启用的模型连接" : "请选择模型连接"}</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.model_id}{!profile.secret_configured ? " · 密钥未配置" : ""}</option>)}</select></Field>
+                        <Field label="事件预测模型连接" required error={validationIssues.find((issue) => issue.fieldId === "create-prediction-profile")?.message}><select id="create-prediction-profile" value={form.prediction_profile_id} disabled={profilesLoading} onChange={(event) => setForm({ ...form, prediction_profile_id: event.target.value })} className={INPUT_CLASS}><option value="">{profilesLoading ? "正在读取模型连接…" : profiles.length === 0 ? "尚无已启用的模型连接" : "请选择模型连接"}</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name} · {profile.model_id} · {profile.configuration?.label || "未验证"}</option>)}</select></Field>
                         {profilesError && <p className="text-[10px] text-rise">模型连接读取失败：{profilesError}</p>}
-                        {!profilesLoading && profiles.length === 0 && <p className="text-[10px] leading-relaxed text-mute">下拉框显示已保存的模型连接。首次使用请在下方添加服务地址、模型 ID 和 API Key。</p>}
+                        {!profilesLoading && profiles.length === 0 && <p className="text-[10px] leading-relaxed text-mute">下拉框显示已保存的模型连接。首次使用请前往设置添加并验证模型连接。</p>}
                         <EventModelConnectionEditor disabled={submitting} onCreated={(profile) => { setProfiles((current) => [profile, ...current.filter((item) => item.id !== profile.id)]); setForm((current) => ({ ...current, prediction_profile_id: profile.id })); setProfilesError(null); }} />
                         <p className="text-[10px] leading-relaxed text-mute">所选连接用于本次事件预测。Pronoia 的平台基模、下方问答模型和评分模型分别配置。</p>
                     </div>}
@@ -3312,91 +3335,8 @@ export function QuantEditor({ form, setForm, showAssetClass = true }: { form: Cr
   );
 }
 
-function SignalEditor({
-  form,
-  setForm,
-  eventMode = false,
-  adapterError,
-  allowPrivateEndpoints = false,
-}: {
-  form: CreateDraft;
-  setForm: (next: CreateDraft) => void;
-  eventMode?: boolean;
-  adapterError?: string;
-  allowPrivateEndpoints?: boolean;
-}) {
-  const secretRefError = secretEnvRefError(form.external_secret_env_ref, "strategy");
-  const secretRefValid = !secretRefError;
-  const endpointError = endpointValidationError(form.external_api_ref, allowPrivateEndpoints);
-  const headerError = form.external_secret_env_ref && !form.external_header_name.trim() ? "使用密钥时必须填写请求头名" : undefined;
-  return (
-    <div className="rounded-xl border border-violet/20 bg-violet-soft/35 p-3.5">
-      <div className="mb-3 flex items-start gap-2.5">
-        <FileInput size={15} className="mt-0.5 shrink-0 text-violet" />
-        <div>
-          <p className="text-[10.5px] font-semibold text-ink">{eventMode ? "外部事件分析 API" : "外部决策 API 适配器"}</p>
-          <p className="mt-0.5 text-[9.5px] leading-relaxed text-mute">{eventMode ? "API 接收历史时点可得事件，返回方向、置信度、理由及预期收益率。Qwen、DeepSeek 的聊天 API 请使用“外部大模型（直接调用）”。" : "API 输出标准 target_weight 信号，平台在同一冻结行情上独立撮合。"} 只保存 endpoint 和密钥环境变量名。</p>
-        </div>
-      </div>
-      <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="接口返回格式" hint="当前支持的固定格式">
-          <div className={INPUT_CLASS}>{eventMode ? "事件预测结果 · v1" : "目标仓位结果 · v1"}</div>
-          <p className="mt-1.5 text-[9px] leading-relaxed text-mute">{eventMode ? "direction、confidence、rationale 表示方向判断；expected_return_pct 表示预期收益率，例如 2 表示 +2%。只有显式提供数值才评估收益率误差。" : "服务返回 target_weight；平台按冻结行情模拟该目标仓位的交易。"}</p>
-        </Field>
-        <Field label="信号版本引用" hint="用于审计与复现">
-          <input
-            value={form.signal_version}
-            onChange={(event) => setForm({ ...form, signal_version: event.target.value })}
-            maxLength={80}
-            className={INPUT_CLASS}
-            placeholder="例如：vendor-signal@2026-09"
-          />
-        </Field>
-        <Field label="预测接口地址" required hint={allowPrivateEndpoints ? "本机 / 私网 HTTP 已获服务端允许" : "公网 HTTPS"} error={endpointError ?? undefined}>
-          <input
-            id="create-external-endpoint"
-            value={form.external_api_ref}
-            onChange={(event) => setForm({ ...form, external_api_ref: event.target.value })}
-            maxLength={4_000}
-            aria-invalid={Boolean(endpointError)}
-            className={cls(INPUT_CLASS, endpointError && "border-rise/60 focus:border-rise/60")}
-            placeholder="https://strategy.example.com/signal"
-          />
-        </Field>
-        <Field label="请求头名" hint="常用 Authorization 或 X-API-Key" error={headerError}>
-          <input
-            id="create-external-header"
-            value={form.external_header_name}
-            onChange={(event) => setForm({ ...form, external_header_name: event.target.value })}
-            aria-invalid={Boolean(headerError)}
-            className={cls(INPUT_CLASS, headerError && "border-rise/60")}
-            placeholder="Authorization"
-          />
-        </Field>
-        <Field label="策略密钥环境变量名" hint={`仅允许 ${STRATEGY_SECRET_ENV_PREFIX} 前缀；变量值由服务端或分享版启动器配置`} error={secretRefError}>
-          <input
-            id="create-external-secret"
-            value={form.external_secret_env_ref}
-            onChange={(event) => setForm({ ...form, external_secret_env_ref: event.target.value })}
-            aria-invalid={!secretRefValid}
-            className={cls(INPUT_CLASS, !secretRefValid && "border-rise/60")}
-            placeholder="PRONOIA_STRATEGY_SECRET_VENDOR"
-            autoCapitalize="characters"
-            spellCheck={false}
-          />
-        </Field>
-      </div>
-      <div className="mt-3 flex items-start gap-2 rounded-lg border border-violet/15 bg-card/70 px-3 py-2.5 text-[9.5px] leading-relaxed text-mute">
-        <ShieldCheck size={11} className="mt-0.5 shrink-0 text-violet" />
-        {allowPrivateEndpoints ? "服务端已允许可信本机与私网接口使用 HTTP；公网接口仍需 HTTPS。" : "当前仅允许公网 HTTPS 接口。本机或私网模型需先由服务端开启访问权限。"} 密钥填写 PRONOIA_STRATEGY_SECRET_* 环境变量名；地址访问与接口返回由服务端再次校验。
-      </div>
-      {adapterError && (
-        <div className="mt-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[9.5px] leading-relaxed text-amber-800">
-          <AlertTriangle size={11} className="mt-0.5 shrink-0" /> {adapterError}
-        </div>
-      )}
-    </div>
-  );
+function SignalEditor({ form, setForm, eventMode = false, adapterError }: { form: CreateDraft; setForm: (next: CreateDraft) => void; eventMode?: boolean; adapterError?: string; allowPrivateEndpoints?: boolean }) {
+  return <div className="space-y-3"><ExternalEventServiceEditor serviceKind={eventMode ? "event" : "quant"} horizon="t3" value={{ ...defaultExternalService(), endpoint: form.external_api_ref, connection_id: form.external_connection_id, service_revision: form.external_service_revision, headers: form.external_connection_headers }} onChange={(value) => setForm({ ...form, external_api_ref: value.endpoint, external_connection_id: value.connection_id, external_service_revision: value.service_revision, external_connection_headers: value.headers, external_secret_env_ref: "", signal_version: value.version })} />{adapterError && <p className="text-sm text-amber-700">{adapterError}</p>}</div>;
 }
 
 function DraftSummary({

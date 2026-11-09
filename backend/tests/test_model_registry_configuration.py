@@ -105,7 +105,9 @@ def test_external_configuration_retains_auth_and_requires_explicit_auth_on_new_e
     spec["timeout_seconds"] = 90
     response = client.put(f"/api/bt/models/{model['id']}/configuration", json={"name": "Service updated", "strategy_spec": spec})
     assert response.status_code == 200, response.text
-    server_spec = registry.execution_setup(model["id"])["strategy_spec"]
+    with pytest.raises(ValueError, match="前往设置"):
+        registry.execution_setup(model["id"])
+    server_spec = next(row for row in registry._rows() if row["id"] == model["id"])["definition"]["strategy_spec"]
     assert server_spec["headers"] == {"Authorization": "env:PRONOIA_STRATEGY_SECRET_TEST"}
     assert server_spec["timeout_seconds"] == 90
     spec["endpoint"] = "https://other.example/signal"
@@ -116,7 +118,7 @@ def test_external_configuration_retains_auth_and_requires_explicit_auth_on_new_e
     spec["headers"] = {}
     accepted = client.put(f"/api/bt/models/{model['id']}/configuration", json={"name": "Unauthenticated service", "strategy_spec": spec})
     assert accepted.status_code == 200, accepted.text
-    assert registry.execution_setup(model["id"])["strategy_spec"]["headers"] == {}
+    assert next(row for row in registry._rows() if row["id"] == model["id"])["definition"]["strategy_spec"]["headers"] == {}
     spec["timeout_seconds"] = -1
     assert client.put(f"/api/bt/models/{model['id']}/configuration", json={"name": "Invalid timeout", "strategy_spec": spec}).status_code == 422
 
@@ -171,6 +173,13 @@ def test_existing_profile_endpoint_updates_both_execution_variants_without_alter
     before = catalog.resolve_model("raw:" + profile["id"])["profile_snapshot"]
     response = client.patch("/api/model-lab/profiles/" + profile["id"], json={"model_id": "updated-model", "max_output_tokens": 12345})
     assert response.status_code == 200, response.text
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as rejected:
+        catalog.resolve_model("raw:" + profile["id"])
+    assert rejected.value.status_code == 409
+    assert rejected.value.detail["code"] == "MODEL_NOT_READY"
+    from app import settings
+    settings.record_model_validation(profiles.get_profile(profile["id"], public=False), True, "synthetic verification")
     for identity in ("raw:" + profile["id"], "pronoia:" + profile["id"], "pronoia:platform"):
         latest = catalog.resolve_model(identity)["profile_snapshot"]
         assert latest["model_id"] == "updated-model" and latest["max_output_tokens"] == 12345
