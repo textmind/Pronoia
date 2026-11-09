@@ -141,6 +141,15 @@ export interface LogicItem {
 export type Part =
   | { type: "thinking"; agent?: string; text: string }
   | {
+      type: "model_round";
+      roundId: string;
+      round?: number;
+      agent?: string;
+      text: string;
+      reasoning: string;
+      status: "streaming" | "completed" | "interrupted";
+    }
+  | {
       type: "tool_call";
       id: string;
       agent?: string;
@@ -180,10 +189,12 @@ export interface Message {
 
 /** SSE 事件（design.md §7） */
 export interface SSEEvent {
+  run_id?: string;
   type:
     | "meta"
     | "thinking"
     | "token"
+    | "model_round"
     | "tool_call"
     | "tool_result"
     | "artifact"
@@ -198,6 +209,9 @@ export interface SSEEvent {
   /** mode="team" 时透传的白名单（与请求体一致） */
   team_members?: string[] | null;
   delta?: string;
+  round_id?: string;
+  round?: number;
+  status?: "completed" | "interrupted";
   id?: string;
   skill?: string;
   args?: Record<string, unknown>;
@@ -231,6 +245,8 @@ export interface HistoryMessage {
 }
 
 export interface CaseDetail {
+  active_run?: { case_id: string; run_id: string; message_id?: string; question: string; mode?: Mode } | null;
+  generating?: boolean;
   case: CaseItem;
   messages: HistoryMessage[];
   artifacts: Artifact[];
@@ -861,6 +877,9 @@ export interface BTDatasetVersionInput {
 /* ===================================== Pronoia 模型评测 ===================================== */
 
 export interface ModelLabProfile {
+  capabilities?: Record<"text" | "tools" | "json" | "web_search", { state: "unknown" | "supported" | "unsupported"; label: string; message: string }>;
+  configuration?: import("./settingsClient").Configuration;
+  thinking_supported?: boolean;
   id: string;
   name: string;
   provider: string;

@@ -1653,6 +1653,10 @@ def prepare_run(req: CreateBacktestRunRequest) -> dict[str, Any]:
     )
 
     config = dict(req.config or {})
+    from ..settings import require_run, require_service
+    if strategy_spec.get("endpoint"):
+        strategy_spec = require_service(strategy_spec)
+    require_run({"config": {**config, "strategy_spec": strategy_spec}})
     effective_model_version = req.model_version
     if runner in {"team_prompt", "team_full"} and not isinstance(
         config.get("model_profile_snapshot"), dict
@@ -1981,6 +1985,8 @@ def start_run(run_id: str) -> Any:
     run = db.get_bt_run(run_id)
     if not run:
         raise HTTPException(status_code=404, detail="run not found")
+    from ..settings import require_run
+    require_run(run)
     if run["status"] in {"running"}:
         return {"ok": False, "run_id": run_id, "message": "already running"}
     from ..event_backtest.datasets import verify_run_frozen_inputs

@@ -23,7 +23,7 @@ def test_saved_pronoia_variant_controls_prediction_and_qa_without_global_change(
     assert row["config"]["model_profile_snapshot"]["id"] == selected["id"]
     batch = repo.get_batch(created.json()["qa_batch_id"], include_tasks=True)
     assert batch["tasks"][0]["config"]["profile_snapshot"]["id"] == selected["id"]
-    assert repo.get_default_profile_id() is None
+    assert repo.get_default_profile_id() != selected["id"]
     assert client.get("/api/model-lab/event-capabilities").json()["platform_default"]["model_id"] == "platform-frozen-model"
     assert client.get(f"/api/bt/models/{saved.json()['id']}").json()["run_ids"] == [row["id"]]
 

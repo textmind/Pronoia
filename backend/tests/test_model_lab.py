@@ -62,6 +62,11 @@ def _profile(client: TestClient, *, name: str = "候选模型") -> dict[str, Any
         "output_price_per_million": 3,
     })
     assert response.status_code == 201, response.text
+    # Lifecycle tests use an already-verified synthetic connection. Probe
+    # behavior itself is covered by test_model_connection_probe/settings.
+    from app import settings
+    from app.model_lab import repository
+    settings.record_model_validation(repository.get_profile(response.json()["id"], public=False), True, "synthetic test verification")
     return response.json()
 
 
@@ -190,6 +195,8 @@ def test_profiles_redact_secrets_and_default_is_snapshotted(
         "secret_env_ref": "PRONOIA_MODEL_SECRET_ROTATED",
     })
     assert changed.status_code == 200, changed.text
+    from app import settings
+    settings.record_model_validation(repo.get_profile(profile_id, public=False), True, "synthetic rotated verification")
     second = client.post("/api/bt/runs", json={
         "name": "默认模型快照 v2",
         "runner": "team_full",
@@ -904,6 +911,8 @@ def test_startup_recovery_reuses_qa_checkpoints_and_formal_run(
         "visibility": "arena_safe",
         "config": {
             "model_lab_task_id": prediction_task["id"],
+            "model_profile_snapshot": prediction_task["config"]["profile_snapshot"],
+            "model_profile_id": profile["id"],
             "model_lab_batch_id": batch_id,
             "evaluation_source": "model_lab",
         },

@@ -67,7 +67,7 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
     try {
       if (ct.includes("application/json")) {
         const body = await res.json();
-        if (body?.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+        if (body?.detail) detail = typeof body.detail === "string" ? body.detail : body.detail?.message ?? JSON.stringify(body.detail);
       } else {
         const text = await res.text();
         const snippet = text.slice(0, 160).replace(/\s+/g, " ");
@@ -107,6 +107,8 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  chatStatus: () => req<{ runs: Array<{ case_id: string; run_id: string; message_id?: string; question: string; mode?: Mode }> }>("/chat/status"),
+  cancelChat: (caseId: string, runId?: string) => req<{ ok: boolean; cancelled: boolean }>("/chat/cancel", { method: "POST", body: JSON.stringify({ case_id: caseId, run_id: runId }) }),
   skills: () => req<SkillMeta[]>("/skills"),
   agents: () => req<AgentMeta[]>("/agents"),
   suggestions: () => req<{ items: SuggestionItem[]; source: string; fallback: boolean }>("/suggestions"),
@@ -197,7 +199,7 @@ export const api = {
         let detail = `auto_check ${r.status}`;
         try {
           const j = await r.json();
-          if (j?.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+          if (j?.detail) detail = typeof j.detail === "string" ? j.detail : j.detail?.message ?? JSON.stringify(j.detail);
         } catch { /* ignore */ }
         throw new Error(detail);
       }
@@ -411,7 +413,7 @@ export const api = {
       let detail = `${res.status} ${res.statusText}`;
       try {
         const body = await res.json();
-        if (body?.detail) detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail);
+        if (body?.detail) detail = typeof body.detail === "string" ? body.detail : body.detail?.message ?? JSON.stringify(body.detail);
       } catch { /* ignore */ }
       throw new Error(detail);
     }
@@ -604,7 +606,7 @@ export async function streamBacktest(
     let detail = `${res.status} ${res.statusText}`;
     try {
       const j = await res.json();
-      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : j.detail?.message ?? JSON.stringify(j.detail);
     } catch { /* ignore */ }
     throw new Error(detail);
   }
@@ -687,7 +689,7 @@ export async function startChatDetached(body: {
     let detail = `${res.status} ${res.statusText}`;
     try {
       const j = await res.json();
-      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : j.detail?.message ?? JSON.stringify(j.detail);
     } catch {
       /* ignore */
     }
@@ -733,7 +735,7 @@ export async function streamChat(
     let detail = `${res.status} ${res.statusText}`;
     try {
       const j = await res.json();
-      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      if (j?.detail) detail = typeof j.detail === "string" ? j.detail : j.detail?.message ?? JSON.stringify(j.detail);
     } catch {
       /* ignore */
     }

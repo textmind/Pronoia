@@ -73,17 +73,17 @@ def test_direct_mode_only_changes_official_profile_proxy_handler(response_transp
 
 
 @pytest.mark.parametrize("reasoning", [None, "private synthetic reasoning"])
-def test_reasoning_budget_exhaustion_confirms_connection_without_claiming_answer(response_transport, reasoning):
+def test_reasoning_budget_exhaustion_requires_complete_probe(response_transport, reasoning):
     responses, requests = response_transport
     responses.append(completion(reasoning_content=reasoning))
     result = providers.validate_profile(PROFILE)
-    assert result["ok"] is True
+    assert result["ok"] is False
     assert result["status"] == "connected_probe_incomplete"
     assert result["answer_verified"] is False
     assert "尚未验证完整回答" in result["message"]
     assert "private synthetic reasoning" not in json.dumps(result)
     assert len(requests) == 1
-    assert requests[0]["max_tokens"] == 32
+    assert requests[0]["max_tokens"] == 2048
     assert PROFILE["max_output_tokens"] == 65536
 
 
@@ -147,8 +147,8 @@ def test_validation_api_persists_incomplete_probe_explanation(direct_client, res
     response = direct_client.post(f"/api/model-lab/profiles/{profile['id']}/validate")
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ok"] is True
+    assert payload["ok"] is False
     assert payload["answer_verified"] is False
     saved = repository.get_profile(profile["id"], public=False)
-    assert saved["last_validation_status"] == "ok"
+    assert saved["last_validation_status"] == "failed"
     assert saved["last_validation_message"] == payload["message"]

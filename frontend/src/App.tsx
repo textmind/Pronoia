@@ -15,6 +15,8 @@ import BacktestQuantPage from "./pages/BacktestQuantPage";
 import BacktestRunsPage from "./pages/BacktestRunsPage";
 import DataManagementPage from "./pages/DataManagementPage";
 import ModelLabPage from "./pages/ModelLabPage";
+import SettingsPage from "./pages/SettingsPage";
+import { settingsRedirect } from "./lib/settingsRoutes";
 
 export default function App() {
   const init = useStore((s) => s.init);
@@ -22,6 +24,8 @@ export default function App() {
   const syncRouteFromLocation = useStore((s) => s.syncRouteFromLocation);
   const liveLogOpen = useStore((s) => s.liveLogOpen);
   useEffect(() => {
+    const redirect = settingsRedirect(window.location.pathname, window.location.search);
+    if (redirect) { window.history.replaceState({}, "", redirect); syncRouteFromLocation(); }
     void init();
   }, [init]);
 
@@ -31,7 +35,11 @@ export default function App() {
       window.history.replaceState({}, "", "/backtest/runs");
       syncRouteFromLocation();
     }
-    const onPopState = () => syncRouteFromLocation();
+    const onPopState = () => {
+      const redirect = settingsRedirect(window.location.pathname, window.location.search);
+      if (redirect) window.history.replaceState({}, "", redirect);
+      syncRouteFromLocation();
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, [syncRouteFromLocation]);
@@ -40,6 +48,7 @@ export default function App() {
     <div className="flex h-screen w-full overflow-hidden bg-paper font-sans text-ink antialiased">
       <Sidebar />
       <div className="relative flex min-w-0 flex-1 overflow-hidden">
+        {view.startsWith("settings-") && <SettingsPage />}
         {view === "chat" && (
           <>
             <ChatPanel />

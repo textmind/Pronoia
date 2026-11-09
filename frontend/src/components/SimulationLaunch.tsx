@@ -4,6 +4,8 @@ import { api } from "../api";
 import type { Artifact, SimulationJob } from "../types";
 import { useStore } from "../store";
 import { friendlySimulationError as friendlyError, simulationNeedsNewRun } from "../lib/researchProgress";
+import { useSettingsStatus } from "../settingsClient";
+import ConfigurationNotice from "./ConfigurationNotice";
 
 const STAGE_CN: Record<string, string> = {
   queued: "等待执行", compiling_spec: "整理证据与参与方", validating: "检查证据",
@@ -21,6 +23,7 @@ export default function SimulationLaunch({ artifact }: { artifact: Artifact }) {
 }
 
 export function SimulationLaunchPanel({ artifact, caseId, onJobChange, managedJob }: { artifact: Artifact; caseId: string; onJobChange?: (job: SimulationJob, select?: boolean) => void; managedJob?: SimulationJob | null }) {
+  const { value: configuration } = useSettingsStatus();
   const loadCase = useStore((state) => state.loadCase);
   const selectArtifact = useStore((state) => state.selectArtifact);
   const [job, setJob] = useState<SimulationJob | null>(null);
@@ -61,6 +64,7 @@ export function SimulationLaunchPanel({ artifact, caseId, onJobChange, managedJo
   useEffect(() => {
     let active = true;
     setPreview(null);
+    if (!configuration?.simulation.ready) { setPreviewLoading(false); return; }
     setPreviewError("");
     setPreviewLoading(true);
     const timer = window.setTimeout(() => void api.simulationPreview(caseId, {
@@ -71,7 +75,7 @@ export function SimulationLaunchPanel({ artifact, caseId, onJobChange, managedJo
       .catch((reason) => { if (active) setPreviewError(friendlyError(reason)); })
       .finally(() => { if (active) setPreviewLoading(false); }), 350);
     return () => { active = false; window.clearTimeout(timer); };
-  }, [actorCap, horizon, question, productVersion, previewRevision, artifact.id, artifact.payload?.question, caseId]);
+  }, [actorCap, horizon, question, productVersion, previewRevision, artifact.id, artifact.payload?.question, caseId, configuration?.simulation.ready]);
 
   useEffect(() => {
     if (managedJob !== undefined || !job || !RUNNING.has(job.status)) return;
@@ -127,9 +131,10 @@ export function SimulationLaunchPanel({ artifact, caseId, onJobChange, managedJo
 
   const busy = job && RUNNING.has(job.status);
   const needsNewRun = simulationNeedsNewRun(job?.error);
-  const canStart = !pending && !restoring && !previewLoading && Boolean(preview) && !previewError;
+  const canStart = configuration?.simulation.ready && !pending && !restoring && !previewLoading && Boolean(preview) && !previewError;
   const progress = Math.max(0, Math.min(100, Math.round((job?.progress || 0) * 100)));
   return <div className="mb-3 rounded-card border border-jade/25 bg-jade-soft/50 p-3.5">
+    <ConfigurationNotice feature="simulation" />
     <div className="flex items-start gap-3">
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-jade text-white"><GitBranch size={15} /></span>
       <div className="min-w-0 flex-1">

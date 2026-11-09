@@ -35,6 +35,7 @@ from .routes import (
     prediction_import,
     prospective,
     simulations,
+    settings,
 )
 
 app = FastAPI(title="Pronoia", version="3.13.0", docs_url="/api/docs")
@@ -43,7 +44,7 @@ app = FastAPI(title="Pronoia", version="3.13.0", docs_url="/api/docs")
 @app.exception_handler(RequestValidationError)
 async def _safe_model_lab_validation_error(request: Request, exc: RequestValidationError):
     """Do not reflect a mistakenly pasted API key in Model Lab 422 JSON."""
-    if request.url.path.startswith(("/api/model-lab", "/api/bt/external-service", "/api/bt/models")) or request.url.path == "/api/bt/event-experiments":
+    if request.url.path.startswith(("/api/settings", "/api/model-lab", "/api/bt/external-service", "/api/bt/models")) or request.url.path == "/api/bt/event-experiments":
         errors = []
         for item in exc.errors():
             # FastAPI normally includes ``input`` and sometimes a ValueError
@@ -162,6 +163,7 @@ app.add_middleware(
 )
 
 app.include_router(meta.router)
+app.include_router(settings.router)
 app.include_router(cases.router)
 app.include_router(chat.router)
 app.include_router(logic.router)
@@ -185,6 +187,8 @@ def _startup() -> None:
     # half of the sharing credentials were supplied.
     config.validate_share_auth_config()
     db.init_db()
+    from .settings import backfill_titles
+    backfill_titles()
     from .event_backtest.arena_workspace import recover_interrupted as recover_arena_workspace
     recover_arena_workspace()
     from .model_lab.repository import seed_builtin_question_set

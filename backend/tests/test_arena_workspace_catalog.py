@@ -18,6 +18,8 @@ def setup(tmp_path, monkeypatch):
                "secret_configured": True, "is_active": True, "max_output_tokens": 65536}
     monkeypatch.setattr(subject.profiles, "get_default_profile", lambda **kw: profile)
     monkeypatch.setattr(subject.profiles, "list_profiles", lambda **kw: [profile])
+    from app import settings
+    settings.write("model-validation:connection", {"revision": settings.model_revision(profile), "ok": True, "message": "synthetic verified fixture"})
     event = {"event_id": "one", "market": "CN", "symbol": "600000", "title": "Actual order announcement",
              "event_time": "2026-09-03T10:00:00+08:00", "available_time": "2026-09-03T10:00:00+08:00",
              "event_text": "Published orders increased.", "source_url": "https://news.fixture.invalid/item",
@@ -67,8 +69,10 @@ def test_profiles_freeze_independent_pronoia_variants_without_changing_default(s
     assert profile == before and variant["profile_snapshot"]["model_id"] == "qwen-test"
     profile["is_active"] = False
     assert all(not m["available"] for m in subject.catalog()["models"][:3])
-    with pytest.raises(ValueError, match="停用"):
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as error:
         subject.resolve_model("raw:connection")
+    assert error.value.status_code == 409
 
 
 def test_strategy_deduplication_ignores_run_name_but_preserves_parameters(setup):
@@ -318,8 +322,14 @@ def test_saved_external_services_do_not_expose_connection_details(setup):
     models = subject.catalog()["models"]
     event_service = next(m for m in models if m["kind"] == "external_service")
     quant_service = next(m for m in models if m["name"] == "Quant predictor")
-    assert event_service["available"] and quant_service["available"]
+    # Legacy service specs stay private, but need a verified shared connection
+    # before they can be selected for a new comparison.
+    assert not event_service["available"] and not quant_service["available"]
     assert "逐时点" in quant_service["description"]
     assert "service.fixture.invalid" not in json.dumps(models)
     assert "server-only" not in json.dumps(models)
-    assert subject.resolve_model(event_service["id"])["strategy_spec"]["endpoint"].endswith("/predict")
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException) as error:
+        subject.resolve_model(event_service["id"])
+    assert error.value.status_code == 409
+    assert error.value.detail["code"] == "SERVICE_NOT_READY"

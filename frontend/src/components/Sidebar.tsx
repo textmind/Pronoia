@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Beaker, LineChart, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Swords, Terminal, Trash2, Users, Wrench, Radio } from "lucide-react";
+import { Beaker, LineChart, MessageSquareText, PanelLeftClose, PanelLeftOpen, Plus, Swords, Terminal, Trash2, Users, Wrench, Radio, Settings } from "lucide-react";
 import { relTime, cls } from "../utils";
 import { useStore, ViewName } from "../store";
 import { VERSION } from "../version";
@@ -18,6 +18,7 @@ export default function Sidebar() {
   const leftOpen = useStore((s) => s.leftOpen);
   const setLeftOpen = useStore((s) => s.setLeftOpen);
   const streaming = useStore((s) => s.streaming);
+  const activeCaseId = useStore((s) => s.activeResearch?.caseId);
   const pendingLogicCount = useStore(
     (s) => s.logicLibrary.filter((x) => x.status === "pending").length,
   );
@@ -32,9 +33,9 @@ export default function Sidebar() {
   const inArenaView = view.startsWith("arena-");
   const inProspectiveView = view.startsWith("prospective-");
   const inSimulationView = view === "simulation-workspace";
-  const inLabView = inBacktestView || inArenaView || inProspectiveView || inSimulationView;
+  const inSettingsView = view.startsWith("settings-");
+  const inLabView = inBacktestView || inArenaView || inProspectiveView || inSimulationView || inSettingsView;
   const goView = (v: ViewName) => {
-    if (streaming && v !== "chat") return; // 流式中禁止切走
     setView(v);
     // 实验页面需要宽幅图表与协议配置；进入时收起全局案例栏，回到研究时恢复。
     setLeftOpen(v === "chat");
@@ -50,7 +51,8 @@ export default function Sidebar() {
   // 折叠态：细栏
   if (!leftOpen) {
     return (
-      <aside className="flex h-full w-11 shrink-0 flex-col items-center gap-1 border-r border-edge bg-[#F4F2EE] py-2">
+      <aside className="flex h-full min-h-0 w-11 shrink-0 flex-col items-center overflow-hidden border-r border-edge bg-[#F4F2EE] py-2">
+        <div className="flex min-h-0 w-full flex-1 flex-col items-center gap-1 overflow-y-auto">
         <button
           onClick={() => setLeftOpen(true)}
           title="展开侧栏"
@@ -140,7 +142,8 @@ export default function Sidebar() {
             {cases.length}
           </span>
         )}
-        <div className="flex-1" />
+        </div>
+        <div className="flex w-full shrink-0 flex-col items-center gap-1 border-t border-edge pt-1">
         {/* 底部 tab 入口（与右栏折叠态对齐） */}
         <button
           onClick={() => goTab("skills")}
@@ -177,6 +180,13 @@ export default function Sidebar() {
             </span>
           )}
         </button>
+        <button
+          title="设置"
+          aria-label="设置"
+          aria-current={inSettingsView ? "page" : undefined}
+          onClick={() => goView("settings-models")}
+          className={cls("rounded-lg p-2 transition-colors", inSettingsView ? "bg-card text-jade shadow-card" : "text-mute hover:bg-card hover:text-ink")}
+        ><Settings size={16} /></button>
         {/* LLM 调用日志 */}
         <button
           onClick={toggleLiveLog}
@@ -196,14 +206,15 @@ export default function Sidebar() {
             backendStatus === "online" ? "bg-jade" : "bg-rise",
           )}
         />
+        </div>
       </aside>
     );
   }
 
   return (
-    <aside className="flex h-full w-[260px] shrink-0 flex-col border-r border-edge bg-[#F4F2EE]">
+    <aside className="flex h-full min-h-0 w-[260px] shrink-0 flex-col overflow-hidden border-r border-edge bg-[#F4F2EE]">
       {/* Logo */}
-      <div className="flex items-start justify-between px-5 pb-4 pt-5">
+      <div className="flex shrink-0 items-start justify-between px-5 pb-4 pt-5">
         <div>
           <div className="flex items-baseline gap-2">
             <h1 className="font-serif text-[22px] font-bold tracking-wide text-ink">Pronoia</h1>
@@ -221,7 +232,7 @@ export default function Sidebar() {
       </div>
 
       {/* 统一工作台导航；短标签让五个入口在侧栏内保持等宽。 */}
-      <div className="mb-2 px-3.5">
+      <div className="mb-2 shrink-0 px-3.5">
         <div className="grid grid-cols-5 gap-1 rounded-lg bg-edge/50 p-1" role="navigation" aria-label="工作台导航">
           <button
             onClick={() => goView("chat")}
@@ -280,7 +291,7 @@ export default function Sidebar() {
 
       {/* 新研究（仅 chat 视图显示）*/}
       {!inLabView && (
-        <div className="px-3.5">
+        <div className="shrink-0 px-3.5">
           <button
             onClick={newCase}
             className="flex w-full items-center justify-center gap-1.5 rounded-card border border-brand/30 bg-card px-3 py-2.5 text-[13px] font-medium text-brand shadow-card transition-all duration-200 hover:bg-brand hover:text-card hover:shadow-pop"
@@ -293,7 +304,7 @@ export default function Sidebar() {
 
       {/* Case 列表（仅 chat 视图显示）*/}
       {!inLabView && (
-        <div className="mt-4 flex-1 overflow-y-auto px-2.5 pb-2">
+        <div className="mt-4 min-h-0 flex-1 overflow-y-auto px-2.5 pb-2">
         <div className="px-2 pb-1.5 text-[11px] font-medium uppercase tracking-wider text-faint">研究案例</div>
         {cases.length === 0 && (
           <div className="mx-2 mt-2 rounded-lg border border-dashed border-edgeDark/70 px-3 py-4 text-center text-[12px] leading-relaxed text-faint">
@@ -309,7 +320,7 @@ export default function Sidebar() {
               <li key={c.id} className="group relative">
                 <button
                   onClick={() => {
-                    if (!active && !streaming) void loadCase(c.id);
+                    if (!active) void loadCase(c.id);
                   }}
                   className={cls(
                     "flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2.5 text-left transition-colors duration-150",
@@ -328,6 +339,7 @@ export default function Sidebar() {
                       )}
                     >
                       {c.title || "未命名研究"}
+                      {streaming && c.id === activeCaseId && <span className="ml-1 text-[10px] text-jade">生成中</span>}
                     </span>
                     <span className="mt-0.5 block text-[11px] text-faint">
                       {relTime(c.updated_at)}
@@ -365,10 +377,10 @@ export default function Sidebar() {
       )}
 
       {/* 回测/Arena 视图下的主体占位：让底部技能入口下沉到下方 */}
-      {inLabView && <div className="flex-1" />}
+      {inLabView && <div className="min-h-0 flex-1" />}
 
       {/* 底部：技能 / 团队 / 逻辑库 入口 */}
-      <div className="border-t border-edge px-2.5 py-2.5">
+      <div className="shrink-0 border-t border-edge px-2.5 py-2.5">
         <div className="grid grid-cols-3 gap-1.5">
           <button
             onClick={() => goTab("skills")}
@@ -407,6 +419,12 @@ export default function Sidebar() {
             )}
           </button>
         </div>
+        <button
+          onClick={() => goView("settings-models")}
+          aria-label="设置"
+          aria-current={inSettingsView ? "page" : undefined}
+          className={cls("mt-1.5 flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-[12px] font-medium transition-colors", inSettingsView ? "border-edge bg-card text-jade shadow-card" : "border-transparent text-mute hover:bg-card/60 hover:text-ink")}
+        ><Settings size={15} />设置</button>
         <div className="mt-2 flex items-center justify-between px-1">
           <div className="flex items-center gap-1.5" title={statusTip}>
             <span

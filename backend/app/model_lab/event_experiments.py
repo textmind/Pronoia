@@ -52,6 +52,8 @@ class EventExperimentResponse(BaseModel):
 
 
 def _resolve_profile(selector: str | None, *, label: str) -> dict[str, Any]:
+    from ..settings import require_model
+    require_model(selector)
     if not selector or selector == PLATFORM_DEFAULT_SELECTOR:
         selected = repo.get_default_profile(public=False) or environment_profile()
     else:
@@ -111,7 +113,8 @@ def start_qa_for_run(run_id: str) -> tuple[bool, str]:
 @router.get("/model-lab/event-capabilities")
 def event_capabilities() -> dict[str, Any]:
     selected = repo.get_default_profile(public=False) or environment_profile()
-    available = bool(selected.get("is_active") and selected.get("secret_configured"))
+    from ..settings import model_status
+    available = model_status(selected)["ready"]
     try:
         validate_registered_model_endpoint(selected.get("base_url"), label="平台默认模型 API")
     except ValueError:

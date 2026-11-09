@@ -102,7 +102,9 @@ def _normalize_suggestions(items: list[dict] | None) -> list[dict]:
 
 @router.get("/health")
 def health():
-    return {"ok": True, "llm": "configured" if config.LLM_API_KEY else "missing_api_key"}
+    from ..settings import overview
+    model = overview()["model"]
+    return {"ok": True, "llm": "configured" if model["ready"] else "not_ready", "configuration_state": model["state"]}
 
 
 @router.get("/skills")
@@ -130,6 +132,8 @@ def agents():
 async def suggestions_refresh():
     fallback = _fallback_suggestions()
     try:
+        from ..settings import require_model
+        require_model()
         obj = await asyncio.wait_for(
             complete_json_with_web_search(
                 "你是 Pronoia 的推荐生成器。请先用联网搜索获取最新财经/市场热点，再生成 6 条适合金融研究工作台首页展示的推荐问题。"

@@ -29,6 +29,8 @@ def list_runs(limit: int = 100) -> dict[str, Any]:
 
 @router.post("/runs")
 def create_run(req: CreateProspectiveRunRequest) -> dict[str, Any]:
+    from ..settings import require_model
+    require_model()
     try:
         capture_at = service._parse_iso(req.capture_at)
     except Exception as exc:
@@ -110,6 +112,8 @@ def get_run(run_id: str) -> dict[str, Any]:
 
 @router.post("/runs/{run_id}/capture")
 async def capture_run(run_id: str) -> dict[str, Any]:
+    from ..settings import require_model
+    require_model()
     try:
         return await service.capture_run(run_id)
     except ValueError as exc:

@@ -5,6 +5,7 @@ import { api } from "../api";
 import { agentColor, agentName } from "../names";
 import { useStore } from "../store";
 import ThinkingBlock, { type ThinkingSegment } from "./ThinkingBlock";
+import ModelRound from "./ModelRound";
 import ToolCallCard from "./ToolCallCard";
 import ArtifactCard from "./ArtifactCard";
 import LogicItemsPanel from "./LogicItemsPanel";
@@ -20,7 +21,7 @@ import { friendlySimulationError, researchProgressParts } from "../lib/researchP
  */
 type TextPart = Extract<Part, { type: "text" }>;
 type RenderItem =
-  | { kind: "thinking"; segments: ThinkingSegment[]; endIdx: number }
+  | { kind: "thinking"; segments: ThinkingSegment[]; startIdx: number; endIdx: number }
   | { kind: "text_envelope"; agent?: string; texts: TextPart[]; indexes: number[]; endIdx: number }
   | { kind: "single_text"; part: TextPart; index: number }
   | { kind: "other"; part: Part; index: number };
@@ -29,7 +30,7 @@ function mergeRenderItems(parts: Part[]): RenderItem[] {
   const items: RenderItem[] = [];
 
   type Buf =
-    | { kind: "thinking"; segments: ThinkingSegment[] }
+    | { kind: "thinking"; segments: ThinkingSegment[]; startIdx: number }
     | { kind: "text"; agent?: string; texts: TextPart[]; indexes: number[] };
   let buf: Buf | null = null;
 
@@ -37,7 +38,7 @@ function mergeRenderItems(parts: Part[]): RenderItem[] {
     if (!buf) return;
     if (buf.kind === "thinking") {
       if (buf.segments.length > 0) {
-        items.push({ kind: "thinking", segments: buf.segments, endIdx: i - 1 });
+        items.push({ kind: "thinking", segments: buf.segments, startIdx: buf.startIdx, endIdx: i - 1 });
       }
     } else {
       if (buf.texts.length === 1) {
@@ -61,7 +62,7 @@ function mergeRenderItems(parts: Part[]): RenderItem[] {
       if (buf?.kind === "thinking") {
         buf.segments.push({ agent: p.agent, text: p.text });
       } else {
-        buf = { kind: "thinking", segments: [{ agent: p.agent, text: p.text }] };
+        buf = { kind: "thinking", segments: [{ agent: p.agent, text: p.text }], startIdx: i };
       }
       return;
     }
@@ -209,18 +210,12 @@ function AgentEnvelope({
       </div>
       {/* 多段正文 */}
       <div className="space-y-1.5">
-        {texts.map((t, j) => {
-          const origIdx = indexes[j];
-          const isLastText = origIdx === lastTextIdx;
-          return (
-            <div key={j}>
-              <Markdown text={t.text} />
-              {pending && isLastText && (
+            <div>
+              <Markdown text={texts.map((t) => t.text).join("")} />
+              {pending && indexes[indexes.length - 1] === lastTextIdx && (
                 <span className="ml-0.5 inline-block h-[15px] w-[2.5px] translate-y-[2px] rounded-full bg-brand animate-blink" />
               )}
             </div>
-          );
-        })}
       </div>
     </div>
   );
@@ -229,6 +224,12 @@ function AgentEnvelope({
 /** team 模式 agent_step 渲染：研究计划 / 专家完成 / 复核结论 */
 function AgentStepView({ part }: { part: Extract<Part, { type: "agent_step" }> }) {
   const agents = useStore((s) => s.agents);
+
+  if (part.phase === "progress") {
+    return <div className="flex items-start gap-2 text-[12px] text-mute" role="status">
+      <ListChecks size={13} className="mt-0.5 shrink-0" /><span>{part.note}</span>
+    </div>;
+  }
 
   if (part.phase === "hypotheses") {
     const running = part.verdict === "running";
@@ -326,12 +327,12 @@ function AgentStepView({ part }: { part: Extract<Part, { type: "agent_step" }> }
     );
   }
 
-  if (part.phase === "interrupted") {
+  if (part.phase === "interrupted" || part.phase === "cancelled") {
     return (
       <div className="flex items-start gap-2 rounded-lg border border-amber-300/50 bg-amber-50 px-3 py-2 text-[12px] text-amber-800">
         <AlertTriangle size={13} className="mt-0.5 shrink-0" />
         <span>
-          <span className="font-medium">本轮研究未完整结束</span>
+          <span className="font-medium">{part.phase === "cancelled" ? "本轮研究已停止" : "本轮研究未完整结束"}</span>
           {part.note && <span className="text-amber-700"> — {part.note}</span>}
         </span>
       </div>
@@ -384,8 +385,12 @@ export default function MessageItem({ message }: { message: Message }) {
       <div className="space-y-2.5">
         {useParts ? (
           renderItems.map((it) => {
+            if (it.kind === "other" && it.part.type === "model_round") {
+              return <ModelRound key={`${message.id}_round_${it.part.roundId}`} part={it.part}
+                pending={!!message.pending} showBadge={isTeam} />;
+            }
             if (it.kind === "thinking") {
-              const key = `${message.id}_think_${it.endIdx}`;
+              const key = `${message.id}_think_${it.startIdx}`;
               return (
                 <ThinkingBlock
                   key={key}

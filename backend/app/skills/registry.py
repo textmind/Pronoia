@@ -56,6 +56,42 @@ class SkillDef:
 REGISTRY: dict[str, SkillDef] = {}
 
 
+def validate_tool_arguments(schema: dict, value: Any, path: str = "参数") -> None:
+    """Check the constraints exposed to the model before invoking a skill."""
+    expected = schema.get("type")
+    types = {"object": dict, "array": list, "string": str, "integer": int, "number": (int, float), "boolean": bool, "null": type(None)}
+    choices = expected if isinstance(expected, list) else [expected] if expected else []
+    if choices and not any(kind in types and isinstance(value, types[kind]) and not (kind in {"integer", "number"} and isinstance(value, bool)) for kind in choices):
+        raise ValueError(f"{path}类型应为 {'/'.join(choices)}")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ValueError(f"{path}不在允许的选项中：{schema['enum']}")
+    if isinstance(value, dict):
+        for key in schema.get("required", []):
+            if key not in value:
+                raise ValueError(f"{path}缺少 {key}")
+        properties = schema.get("properties", {})
+        for key, item in value.items():
+            if key in properties:
+                validate_tool_arguments(properties[key], item, path + "." + key)
+            elif schema.get("additionalProperties") is False:
+                raise ValueError(f"{path}含未支持字段 {key}")
+    if isinstance(value, list):
+        if len(value) < schema.get("minItems", 0):
+            raise ValueError(f"{path}至少需要 {schema['minItems']} 项")
+        if isinstance(schema.get("items"), dict):
+            for item in value:
+                validate_tool_arguments(schema["items"], item, path + "[]")
+    if schema.get("anyOf"):
+        for option in schema["anyOf"]:
+            try:
+                validate_tool_arguments(option, value, path)
+                break
+            except ValueError:
+                continue
+        else:
+            raise ValueError(f"{path}未满足任一可选条件")
+
+
 def skill(name: str, description: str, parameters: dict[str, Any],
           *, category: str = "atomic", internal: bool = False, composes: list[str] | None = None):
     """Register a skill handler.
@@ -165,7 +201,33 @@ def serialize_tool_result(result: dict, max_chars: int) -> str:
             text = json.dumps(candidate, ensure_ascii=False, default=str)
             if len(text) <= max_chars:
                 return text
-    return text[: max_chars - 60] + '..."(已截断)"}'
+    # Composite skills return nested dictionaries, not just row arrays. Never
+    # cut the JSON text: it can remove units/sources and leave broken syntax.
+    def shrink(value, depth=0):
+        if isinstance(value, str):
+            return value if len(value) <= string_limit else value[:string_limit] + "…"
+        if isinstance(value, list):
+            return [shrink(item, depth + 1) for item in value[:row_limit]]
+        if isinstance(value, dict):
+            # Full artifact payloads are already persisted and duplicate data.
+            return {key: shrink(item, depth + 1) for key, item in value.items() if key not in {"artifact", "artifacts"}}
+        return value
+    for row_limit, string_limit in ((8, 500), (4, 240), (2, 120), (1, 60)):
+        candidate = shrink(result)
+        candidate.update(truncated=True, note="结果较大，已按结构裁剪；完整结果见产出物。")
+        text = json.dumps(candidate, ensure_ascii=False, default=str)
+        if len(text) <= max_chars:
+            return text
+    candidate = {key: result[key] for key in ("ok", "meta", "error", "degraded") if key in result}
+    candidate.update(truncated=True, note="结果超过上下文预算，完整结果见产出物。")
+    text = json.dumps(shrink(candidate), ensure_ascii=False, default=str)
+    if len(text) <= max_chars:
+        return text
+    for fallback in ({"ok": bool(result.get("ok")), "truncated": True, "note": "结果超出预算，详见产出物。"}, {"truncated": True}, {}):
+        text = json.dumps(fallback, ensure_ascii=False, separators=(",", ":"))
+        if len(text) <= max_chars:
+            return text
+    return "{}"
 
 
 def tool_schema_subset(names: list[str]) -> list[dict]:

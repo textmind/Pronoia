@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { api, streamChat, startChatDetached, StreamAbortedError } from "./api";
+import { SETTINGS_VIEWS } from "./lib/settingsRoutes";
+import { settingsRequest, settingsChanged, type SettingsStatus } from "./settingsClient";
 import type {
   AgentMeta,
   ArenaItem,
@@ -20,6 +22,8 @@ import type {
   SSEEvent,
 } from "./types";
 import { uid } from "./utils";
+import { researchUpdate, type ResearchSession } from "./lib/researchSession";
+import { appendStreamEvent, finishStreamRounds } from "./lib/researchStream";
 
 /* ---------------- logic library 持久化 ---------------- */
 
@@ -75,15 +79,6 @@ function saveLogicLibrary(items: LogicItem[]) {
 }
 
 /* ---------------- parts 工具 ---------------- */
-
-/** thinking / token delta：与上一同类型同 agent part 合并追加 */
-function appendDelta(parts: Part[], type: "thinking" | "text", agent: string | undefined, delta: string): Part[] {
-  const last = parts[parts.length - 1];
-  if (last && last.type === type && last.agent === agent) {
-    return [...parts.slice(0, -1), { ...last, text: last.text + delta }];
-  }
-  return [...parts, { type, agent, text: delta } as Part];
-}
 
 function sortArtifacts(xs: Artifact[]): Artifact[] {
   return [...xs].sort((a, b) => {
@@ -162,6 +157,10 @@ export function partsFromHistory(m: HistoryMessage): Part[] {
         preview: (it.preview ?? it.result_preview) as string | undefined,
         artifactId,
       });
+    } else if (t === "model_round" && it.round_id) {
+      parts.push({ type: "model_round", roundId: String(it.round_id), round: it.round as number | undefined,
+        agent, text: String(it.text ?? ""), reasoning: String(it.reasoning ?? ""),
+        status: it.status === "streaming" ? "streaming" : it.status === "completed" ? "completed" : "interrupted" });
     } else if (t === "thinking" || t === "thought") {
       const text = String(it.text ?? it.delta ?? it.content ?? "");
       if (text) parts.push({ type: "thinking", agent, text });
@@ -232,7 +231,11 @@ export function partsFromHistory(m: HistoryMessage): Part[] {
     }
   }
 
-  if (m.content) {
+  // New traces contain the complete display body; appending m.content would
+  // repeat it (and, in team mode, discard the experts' original layout).
+  const hasStreamLayout = list.some((it) => it && typeof it === "object" &&
+    (it as Record<string, unknown>).type === "stream_layout");
+  if (m.content && !hasStreamLayout) {
     const last = parts[parts.length - 1];
     if (!(last?.type === "text" && last.text === m.content)) {
       parts.push({ type: "text", agent: m.agent ?? undefined, text: m.content });
@@ -248,6 +251,10 @@ export function partsFromHistory(m: HistoryMessage): Part[] {
  * setView 会将它统一导航到回测首页“运行记录”。
  */
 export type ViewName =
+  | "settings-models"
+  | "settings-defaults"
+  | "settings-services"
+  | "settings-simulation"
   | "simulation-workspace"
   | "chat"
   | "backtest-event"
@@ -307,6 +314,7 @@ function routeFromLocation(): RouteSnapshot {
     };
   }
   const views: Record<string, RouteSnapshot["view"]> = {
+    ...SETTINGS_VIEWS,
     "/backtest/event": "backtest-event",
     "/backtest/quant": "backtest-quant",
     "/backtest/runs": "backtest-runs",
@@ -331,6 +339,10 @@ function pathForView(
 ): string {
   const normalized = view === "backtest-list" ? "backtest-runs" : view;
   const paths: Partial<Record<ViewName, string>> = {
+    "settings-models": "/settings/models",
+    "settings-defaults": "/settings/defaults",
+    "settings-services": "/settings/services",
+    "settings-simulation": "/settings/simulation",
     chat: "/",
     "simulation-workspace": "/simulations",
     "backtest-event": "/backtest/event",
@@ -370,6 +382,8 @@ interface FeverState {
   leftOpen: boolean;
   selectedArtifactId: string | null;
   streaming: boolean;
+  activeResearch: ResearchSession | null;
+  researchError: string;
   mode: Mode;
   /** mode="agent" 时选定要直接调用的 Agent id（predictor / market_analyst / event_scout ...） */
   selectedAgent: string;
@@ -408,6 +422,7 @@ interface FeverState {
   init: () => Promise<void>;
   sendMessage: (text: string, mode?: Mode, agent?: string) => Promise<void>;
   stop: () => void;
+  resumeResearch: () => Promise<void>;
   retryLastMessage: () => Promise<void>;
   loadCase: (id: string) => Promise<void>;
   newCase: () => void;
@@ -479,6 +494,7 @@ interface FeverState {
 }
 
 let abortCtl: AbortController | null = null;
+let sendLock = false;
 /** 当前流式所属 case / message / question：logic_items 事件入库存档时使用 */
 let currentCtx: { caseId: string; messageId: string; question: string } | null = null;
 
@@ -536,21 +552,6 @@ if (typeof window !== "undefined") {
  * 只有 tool_trace 没正文（典型：router 还在 thinking/调工具早期被掐）时
  * 返回 null 走自动重试，避免出现"无正文又无错误标记"的假完成消息。
  */
-async function salvageFromServer(caseId: string, question: string) {
-  try {
-    const d = await api.caseDetail(caseId);
-    const msgs = d.messages ?? [];
-    const last = msgs[msgs.length - 1];
-    const prev = msgs[msgs.length - 2];
-    if (!last || last.role !== "assistant") return null;
-    if (!prev || prev.role !== "user" || prev.content !== question) return null;
-    if (!(last.content ?? "").trim()) return null;
-    const parts = partsFromHistory(last);
-    return { last, parts, artifacts: d.artifacts ?? [] };
-  } catch {
-    return null;
-  }
-}
 
 /**
  * 断流轮询挽回：公网链路把 SSE 掐断时，后端生成是独立 Task（detached），
@@ -585,6 +586,7 @@ async function pollUntilComplete(
     if (signal?.aborted) return null;
     try {
       const d = await api.caseDetail(caseId);
+      useStore.setState((state) => ({ cases: sortCases(state.cases.map((item) => item.id === caseId ? { ...item, ...d.case } : item)) }));
       const msgs = d.messages ?? [];
       const last = msgs[msgs.length - 1];
       const prev = msgs[msgs.length - 2];
@@ -601,7 +603,7 @@ async function pollUntilComplete(
       }
       if (key === lastKey) {
         stable++;
-        if (content && stable >= STABLE_ROUNDS) {
+      if (stable >= STABLE_ROUNDS && d.generating !== true) {
           return { last, parts: partsFromHistory(last), artifacts: d.artifacts ?? [] };
         }
       } else {
@@ -627,40 +629,37 @@ export const useStore = create<FeverState>((set, get) => {
     (prefs.teamMembersSet == null && Object.prototype.hasOwnProperty.call(prefs, "teamMembers"));
   /** 更新流式中的 assistant 消息 */
   const patchPending = (fn: (m: Message) => Message) => {
-    set((s) => {
-      const idx = s.messages.findIndex((m) => m.pending);
-      if (idx < 0) return s;
-      const next = [...s.messages];
-      next[idx] = fn(next[idx]);
-      return { messages: next };
-    });
+    set((s) => researchUpdate(s, (session) => ({ ...session, messages: session.messages.map((m) => m.id === session.messageId ? fn(m) : m) })));
   };
+  const updateArtifacts = (fn: (items: Artifact[]) => Artifact[]) => set((s) => researchUpdate(s, (session) => ({ ...session, artifacts: fn(session.artifacts) })));
 
   const patchParts = (fn: (parts: Part[]) => Part[]) => {
     patchPending((m) => ({ ...m, parts: fn(m.parts ?? []) }));
   };
 
   const finalizePending = (fn?: (m: Message) => Message) => {
-    set((s) => ({
-      messages: s.messages.map((m) => (m.pending ? { ...m, ...(fn?.(m) ?? {}), pending: false } : m)),
-      streaming: false,
-    }));
+    set((s) => ({ ...researchUpdate(s, (session) => ({ ...session, messages: session.messages.map((m) => {
+      if (m.id !== session.messageId) return m;
+      const final = fn?.(m) ?? m;
+      return { ...final, parts: finishStreamRounds(final.parts ?? []), pending: false };
+    }) })), streaming: false }));
   };
 
   const handleEvent = (ev: SSEEvent) => {
     switch (ev.type) {
       case "meta":
         if (ev.mode) patchPending((m) => ({ ...m, mode: ev.mode }));
-        // 后端可能新建了 case（前端传入的 case_id 无效时），同步到前端
-        if (ev.case_id && ev.case_id !== get().currentCaseId) {
-          set({ currentCaseId: ev.case_id });
+        if (ev.message_id) {
+          set((s) => researchUpdate(s, (session) => ({ ...session, messageId: ev.message_id!, messages: session.messages.map((m) => m.id === session.messageId ? { ...m, id: ev.message_id! } : m) })));
+          if (currentCtx) currentCtx.messageId = ev.message_id;
         }
+        // 后端可能新建了 case（前端传入的 case_id 无效时），同步到前端
+        if (ev.run_id) set((s) => researchUpdate(s, (session) => ({ ...session, runId: ev.run_id })));
         break;
       case "thinking":
-        if (ev.delta) patchParts((p) => appendDelta(p, "thinking", ev.agent, ev.delta!));
-        break;
       case "token":
-        if (ev.delta) patchParts((p) => appendDelta(p, "text", ev.agent, ev.delta!));
+      case "model_round":
+        patchParts((p) => appendStreamEvent(p, ev));
         break;
       case "tool_call":
         patchParts((p) => [
@@ -693,9 +692,7 @@ export const useStore = create<FeverState>((set, get) => {
       case "artifact": {
         const a = ev.artifact;
         if (!a) break;
-        set((st) => ({
-          artifacts: sortArtifacts([...st.artifacts.filter((x) => x.id !== a.id), a]),
-        }));
+        updateArtifacts((items) => sortArtifacts([...items.filter((x) => x.id !== a.id), a]));
         patchParts((p) => [
           ...p,
           { type: "artifact", agent: ev.agent, artifactId: a.id, kind: a.kind, title: a.title },
@@ -703,6 +700,7 @@ export const useStore = create<FeverState>((set, get) => {
         break;
       }
       case "agent_step":
+        if (ev.phase === "agent_done") patchParts((p) => finishStreamRounds(p, ev.agent));
         patchParts((p) => [
           ...p,
           {
@@ -735,16 +733,13 @@ export const useStore = create<FeverState>((set, get) => {
       case "case_title":
         if (ev.title) {
           set((st) => ({
-            cases: st.cases.map((c) => (c.id === st.currentCaseId ? { ...c, title: ev.title! } : c)),
+            cases: st.cases.map((c) => (c.id === (ev.case_id ?? currentCtx?.caseId) ? { ...c, title: ev.title! } : c)),
           }));
         }
         break;
       case "done":
         finalizePending((m) => ({ ...m, id: ev.message_id ?? m.id }));
         // 兜底：确保 currentCaseId 与后端一致
-        if (ev.case_id && ev.case_id !== get().currentCaseId) {
-          set({ currentCaseId: ev.case_id });
-        }
         // 刷新 case 列表（updated_at / message_count）
         api
           .cases()
@@ -771,6 +766,8 @@ export const useStore = create<FeverState>((set, get) => {
     leftOpen: prefs.leftOpen ?? true,
     selectedArtifactId: null,
     streaming: false,
+    activeResearch: null,
+    researchError: "",
     mode: prefs.mode ?? "auto",
     selectedAgent: prefs.selectedAgent ?? "predictor",
     // 默认全选（首次进站无缓存时=空数组 → 在 setSkills 拉完 agents 后再补全）
@@ -832,24 +829,42 @@ export const useStore = create<FeverState>((set, get) => {
         teamMembers,
         teamMembersSet,
       });
+      void get().resumeResearch();
     },
 
     sendMessage: async (text, mode, agent) => {
       const content = text.trim();
-      if (!content || get().streaming) return;
+      if (!content || get().streaming || sendLock) return;
+      const origin = { caseId: get().currentCaseId, messages: get().messages, artifacts: get().artifacts, mode: mode ?? get().mode, agent: agent ?? get().selectedAgent, teamMembers: [...get().teamMembers] };
+      sendLock = true;
+      try {
+      try {
+        const configuration = await settingsRequest<SettingsStatus>("/settings/status");
+        if (!configuration.model.ready || configuration.model.research_ready === false) {
+          set({ promptSeed: content });
+          settingsChanged();
+          return;
+        }
+      } catch {
+        if (get().currentCaseId !== origin.caseId) { set({ researchError: "无法读取模型配置，请检查服务连接后重试。" }); return; }
+        set({ messages: [...get().messages, { id: uid(), role: "assistant", content: "无法读取模型配置，请检查服务连接后重试。", error: true }] });
+        return;
+      }
       // 防御性：进入时先 abort 任何残留的旧 controller（HMR / 异常路径留下的孤儿）
+      if (get().streaming) return;
       abortCtl?.abort();
-      const useMode = mode ?? get().mode;
+      const useMode = origin.mode;
       // agent 模式下：取调用方传入的 agent；fallback 到 state.selectedAgent
-      const useAgent = agent ?? (useMode === "agent" ? get().selectedAgent : null);
+      const useAgent = useMode === "agent" ? origin.agent : agent ?? null;
 
-      let caseId = get().currentCaseId;
+      let caseId = origin.caseId;
       if (!caseId) {
         try {
           const c = await api.createCase();
           caseId = c.id;
-          set((s) => ({ currentCaseId: c.id, cases: sortCases([c, ...s.cases]) }));
+          set((s) => ({ ...(s.currentCaseId === origin.caseId ? { currentCaseId: c.id } : {}), cases: sortCases([c, ...s.cases]) }));
         } catch (e) {
+          if (get().currentCaseId !== origin.caseId) { set({ researchError: "创建研究失败，请重试。" }); return; }
           set((s) => ({
             messages: [
               ...s.messages,
@@ -878,8 +893,10 @@ export const useStore = create<FeverState>((set, get) => {
         created_at: now,
       };
       set((s) => ({
-        messages: [...s.messages, userMsg, asstMsg],
+        ...(s.currentCaseId === caseId ? { messages: [...origin.messages, userMsg, asstMsg] } : {}),
         streaming: true,
+        researchError: "",
+        activeResearch: { caseId: caseId!, messageId: asstMsg.id, question: content, messages: [...origin.messages, userMsg, asstMsg], artifacts: origin.artifacts },
         mode: useMode,
       }));
 
@@ -899,12 +916,12 @@ export const useStore = create<FeverState>((set, get) => {
         message: content,
         mode: useMode,
         agent: useAgent,
-        team_members: useMode === "team" ? get().teamMembers : undefined,
+        team_members: useMode === "team" ? origin.teamMembers : undefined,
       };
       const progressSync = (parts: Part[], textContent: string, polledArtifacts: Artifact[]) => {
         patchPending((m) => ({ ...m, parts, content: textContent }));
         // 轮询期间产物也实时同步到右栏（SSE 模式下是 artifact 事件即时推送的）
-        set({ artifacts: sortArtifacts(polledArtifacts) });
+        updateArtifacts(() => sortArtifacts(polledArtifacts));
       };
       const applyPolled = (polled: NonNullable<Awaited<ReturnType<typeof pollUntilComplete>>>) => {
         finalizePending((m) => ({
@@ -913,7 +930,7 @@ export const useStore = create<FeverState>((set, get) => {
           content: polled.last.content,
           parts: polled.parts,
         }));
-        set({ artifacts: sortArtifacts(polled.artifacts ?? []) });
+        updateArtifacts(() => sortArtifacts(polled.artifacts ?? []));
       };
 
       if (preferPolling) {
@@ -977,34 +994,9 @@ export const useStore = create<FeverState>((set, get) => {
           } else if (abortCtl?.signal.aborted) {
             streamError = new StreamAbortedError();
           } else {
-            // 轮询也没拿到结果（生成任务异常）：兜底重试一次完整生成
-            patchPending((m) => ({ ...m, parts: [], content: "" }));
-            await sleep(1200);
-            try {
-              await startChatDetached(chatBody);
-              const retried = await pollUntilComplete(caseId, content, progressSync, abortCtl.signal);
-              if (retried) {
-                applyPolled(retried);
-                streamError = null;
-              } else {
-                streamError = new Error("生成超时，请点击重新生成");
-              }
-            } catch (e2) {
-              streamError = e2;
-              if (!(e2 instanceof StreamAbortedError)) {
-                const salvaged = await salvageFromServer(caseId, content);
-                if (salvaged) {
-                  finalizePending((m) => ({
-                    ...m,
-                    id: salvaged.last.id,
-                    content: salvaged.last.content,
-                    parts: salvaged.parts,
-                  }));
-                  set({ artifacts: sortArtifacts(salvaged.artifacts ?? []) });
-                  streamError = null;
-                }
-              }
-            }
+            // Do not resubmit a generation after losing its subscription.
+            // A retry must be an explicit user action after server completion.
+            streamError = new Error("暂时无法同步后台研究，请返回该研究或刷新以恢复进度");
           }
         }
       }
@@ -1028,10 +1020,54 @@ export const useStore = create<FeverState>((set, get) => {
       }
       abortCtl = null;
       currentCtx = null;
+      set({ activeResearch: null });
+      const refreshCases = () => api.cases().then((cases) => set({ cases: sortCases(cases) })).catch(() => undefined);
+      void refreshCases();
+      // Optional title improvement has a ten-second bound, after body completion.
+      window.setTimeout(() => void refreshCases(), 11000);
+      if (streamError !== null) void get().resumeResearch();
+      } finally { sendLock = false; }
     },
 
     stop: () => {
-      abortCtl?.abort();
+      const session = get().activeResearch;
+      if (!session) return;
+      const controller = abortCtl;
+      void (async () => {
+        let runId = session.runId;
+        for (let attempt = 0; !runId && attempt < 5; attempt++) {
+          const run = (await api.chatStatus()).runs.find((r) => r.case_id === session.caseId && r.question === session.question);
+          runId = run?.run_id;
+          if (!runId) await sleep(200);
+        }
+        if (!runId) return;
+        const result = await api.cancelChat(session.caseId, runId);
+        if (result.cancelled) controller?.abort();
+      })().catch(() => { set({ researchError: "停止请求失败，请重试；研究仍在后台运行。" }); });
+    },
+
+    resumeResearch: async () => {
+      if (get().streaming) return;
+      try {
+        const run = (await api.chatStatus()).runs[0];
+        if (!run || get().streaming) return;
+        const detail = await api.caseDetail(run.case_id);
+        if (get().streaming || !detail.generating) return;
+        const activeMessageId = detail.active_run?.message_id || run.message_id;
+        if (!activeMessageId) { window.setTimeout(() => void get().resumeResearch(), 300); return; }
+        const messages = detail.messages.map((m) => ({ ...m, parts: m.role === "assistant" ? partsFromHistory(m) : undefined, pending: m.role === "assistant" && m.id === activeMessageId }));
+        const messageId = messages[messages.length - 1]?.id;
+        if (!messageId) return;
+        const session: ResearchSession = { caseId: run.case_id, runId: run.run_id, messageId, question: run.question, messages, artifacts: detail.artifacts ?? [] };
+        currentCtx = { caseId: run.case_id, messageId, question: run.question };
+        abortCtl = new AbortController();
+        set((s) => ({ streaming: true, activeResearch: session, ...(s.currentCaseId === run.case_id ? { messages, artifacts: session.artifacts } : {}) }));
+        const result = await pollUntilComplete(run.case_id, run.question, (parts, content, artifacts) => { patchPending((m) => ({ ...m, parts, content })); updateArtifacts(() => sortArtifacts(artifacts)); }, abortCtl.signal);
+        if (result) { finalizePending((m) => ({ ...m, id: result.last.id, content: result.last.content, parts: result.parts })); }
+        else finalizePending((m) => ({ ...m, error: true, errorMessage: "同步已结束，可刷新恢复后台研究状态" }));
+        set({ activeResearch: null }); currentCtx = null; abortCtl = null;
+        void api.cases().then((cases) => set({ cases: sortCases(cases) })).catch(() => undefined);
+      } catch { /* A later visit retries discovery without starting a model. */ }
     },
 
     retryLastMessage: async () => {
@@ -1065,10 +1101,12 @@ export const useStore = create<FeverState>((set, get) => {
     },
 
     loadCase: async (id) => {
-      if (get().streaming) get().stop();
       set({ loadingCase: true, currentCaseId: id, selectedArtifactId: null });
+      const active = get().activeResearch;
+      if (active?.caseId === id) { set({ messages: active.messages, artifacts: active.artifacts, loadingCase: false }); return; }
       try {
         const d = await api.caseDetail(id);
+        if (get().currentCaseId !== id) return;
         const messages: Message[] = d.messages.map((m) => ({
           id: m.id,
           role: m.role,
@@ -1087,6 +1125,7 @@ export const useStore = create<FeverState>((set, get) => {
           ),
         });
       } catch (e) {
+        if (get().currentCaseId !== id) return;
         set({
           messages: [
             {
@@ -1104,7 +1143,6 @@ export const useStore = create<FeverState>((set, get) => {
     },
 
     newCase: () => {
-      if (get().streaming) get().stop();
       set({
         currentCaseId: null,
         messages: [],
@@ -1115,6 +1153,7 @@ export const useStore = create<FeverState>((set, get) => {
     },
 
     deleteCase: async (id) => {
+      if (get().streaming && get().activeResearch?.caseId === id) { set({ researchError: "请先停止这项研究，再删除案例。" }); return; }
       try {
         await api.deleteCase(id);
       } catch {
@@ -1436,8 +1475,6 @@ export const useStore = create<FeverState>((set, get) => {
     /* ===================================== Backtest 方法 ===================================== */
 
     setView: (v) => {
-      // 切页面前如果 chat 在 streaming，则先停掉，避免挂起的 SSE 泄漏
-      if (v !== "chat" && get().streaming) get().stop();
       const view = v === "backtest-list" ? "backtest-runs" : v;
       const next = {
         view,
@@ -1452,12 +1489,10 @@ export const useStore = create<FeverState>((set, get) => {
 
     syncRouteFromLocation: () => {
       const route = routeFromLocation();
-      if (route.view !== "chat" && get().streaming) get().stop();
       set(route);
     },
 
     openBTDetail: (runId) => {
-      if (get().streaming) get().stop();
       const next = {
         view: "backtest-detail" as const,
         currentBTRunId: runId,
@@ -1499,7 +1534,6 @@ export const useStore = create<FeverState>((set, get) => {
     /* ===================================== Arena 方法 ===================================== */
 
     openArenaDetail: (arenaId) => {
-      if (get().streaming) get().stop();
       const next = {
         view: "arena-detail" as const,
         currentArenaId: arenaId,
@@ -1536,7 +1570,6 @@ export const useStore = create<FeverState>((set, get) => {
     },
 
     openProspectiveDetail: (runId) => {
-      if (get().streaming) get().stop();
       const next = {
         view: "prospective-detail" as const,
         currentProspectiveRunId: runId,

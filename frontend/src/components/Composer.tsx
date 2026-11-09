@@ -5,6 +5,8 @@ import { useStore } from "../store";
 import type { Mode } from "../types";
 import AgentPicker from "./AgentPicker";
 import TeamMemberPicker from "./TeamMemberPicker";
+import ConfigurationNotice from "./ConfigurationNotice";
+import { useSettingsStatus, useTaskDraft } from "../settingsClient";
 
 /** 底部输入区：
  *  - 模式 segmented（auto/agent/team）
@@ -13,10 +15,13 @@ import TeamMemberPicker from "./TeamMemberPicker";
  *  - 自动增高 textarea + 发送/停止 */
 export default function Composer() {
   const [text, setText] = useState("");
+  useTaskDraft("pronoia.chat-composer-draft", text, setText);
+  const { value: configuration } = useSettingsStatus();
   const [pickerOpen, setPickerOpen] = useState(false);
   const [teamPickerOpen, setTeamPickerOpen] = useState(false);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const streaming = useStore((s) => s.streaming);
+  const researchError = useStore((s) => s.researchError);
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
   const sendMessage = useStore((s) => s.sendMessage);
@@ -55,7 +60,7 @@ export default function Composer() {
     ta.style.height = Math.min(ta.scrollHeight, 180) + "px";
   }, [text]);
 
-  const canSend = text.trim().length > 0 && !streaming;
+  const canSend = text.trim().length > 0 && !streaming && configuration?.model.ready === true && configuration.model.research_ready !== false;
   const currentAgent = agents.find((a) => a.id === selectedAgent) || agents[0];
   // 过滤出可单独调度的"前台"专家（去掉内部调度/调度辅助 agent）
   const dispatchableAgents = agents.filter(
@@ -87,6 +92,8 @@ export default function Composer() {
 
   return (
     <div className="border-t border-edge bg-paper/90 px-4 pb-4 pt-3 backdrop-blur">
+      <ConfigurationNotice />
+      {researchError && <p role="alert" className="mx-auto mb-2 max-w-3xl text-xs text-rise">{researchError}</p>}
       <div className="mx-auto w-full max-w-3xl">
         <div className="rounded-card border border-edge bg-card shadow-card transition-shadow focus-within:shadow-pop focus-within:border-edgeDark">
           {/* 模式切换（独占一行） */}

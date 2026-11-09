@@ -51,6 +51,7 @@ def _name(value: Any, default: str) -> str:
 
 
 def _profile_entry(identity: str, kind: str, profile: dict) -> tuple[dict, dict]:
+    from ..settings import model_status
     model_id = _name(profile.get("model_id"), "未配置")
     label = _name(profile.get("name"), model_id)
     name = f"Pronoia（{model_id}）· 平台默认" if identity == "pronoia:platform" else (
@@ -58,6 +59,9 @@ def _profile_entry(identity: str, kind: str, profile: dict) -> tuple[dict, dict]
     reason = ("模型连接已停用" if not profile.get("is_active") else
               "请先在模型连接中配置 API Key" if not profile.get("secret_configured") else
               "请补全模型 ID 和接口地址" if not profile.get("model_id") or not profile.get("base_url") else None)
+    configuration = model_status(profile)
+    if not configuration["ready"]:
+        reason = "模型连接" + configuration["label"] + "，请前往设置"
     public = {"id": identity, "name": name, "kind": kind, "model_id": model_id,
         "track": "event",
         "available": reason is None, "reason": reason,
@@ -146,6 +150,15 @@ def _saved_models(runs: list[dict]) -> tuple[list[dict], dict[str, dict]]:
     # broad target declarations so a model can never appear in both Arenas.
     for identity, model in internal.items():
         spec = _dict(model.get("strategy_spec"))
+        if spec.get("endpoint"):
+            from ..settings import service, services, service_status
+            connection = service(str(spec.get("service_connection_id") or "")) or next((item for item in services() if item.get("endpoint") == spec.get("endpoint") and item.get("headers", {}) == spec.get("headers", {})), None)
+            connection_status = service_status(connection)
+            if not connection_status["ready"]:
+                reason = "预测服务" + connection_status["label"] + "，请前往设置"
+                model.update(available=False, reason=reason)
+                if identity in public_by_id:
+                    public_by_id[identity].update(available=False, reason=reason)
         track = "quant" if (
             model.get("kind") == "quant"
             or spec.get("type") in {"quant", "api"}
@@ -481,6 +494,14 @@ def resolve_model(model_id: str) -> dict:
     if model is None:
         raise ValueError("所选模型已删除或配置发生变化，请刷新后重新选择")
     if not model["available"]:
+        # This resolves a new comparison, so current connections must be ready.
+        # Existing comparisons already carry their own frozen snapshots.
+        from ..settings import require_model, require_service
+        if model.get("profile_snapshot"):
+            require_model(model["profile_snapshot"].get("id"))
+        spec = model.get("strategy_spec") or {}
+        if spec.get("endpoint"):
+            require_service(spec)
         raise ValueError(model["name"] + "：" + str(model["reason"]))
     return deepcopy(model)
 

@@ -17,6 +17,11 @@ def event_env(model_lab_env: TestClient, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(config, "LLM_BASE_URL", "https://platform.example.invalid/v1")
     monkeypatch.setattr(config, "LLM_MODEL", "platform-frozen-model")
     monkeypatch.setattr(config, "LLM_API_KEY", "trusted-platform-key-never-persist")
+    from app import settings
+    from app.model_lab import repository
+    settings.initialize()
+    selected = repository.get_default_profile(public=False)
+    settings.record_model_validation(selected, True, "synthetic migrated connection verification")
     return model_lab_env
 
 
@@ -47,6 +52,13 @@ def _hold_prediction(monkeypatch: pytest.MonkeyPatch, *, fail: bool = False):
     return started
 
 
+def _verified_service(endpoint):
+    from app import db, settings
+    item = {"id": db.new_id(), "name": "Synthetic service", "kind": "event", "endpoint": endpoint, "headers": {}, "auth_mode": "none", "is_active": True, "timeout_seconds": 30, "version": ""}
+    item["validation"] = {"revision": settings.fingerprint(item), "ok": True, "message": "synthetic verification"}
+    settings.write("services", [item])
+
+
 def test_environment_default_is_server_owned_frozen_and_hidden(event_env: TestClient):
     from app import db, config
     from app.model_lab import repository as repo
@@ -58,7 +70,7 @@ def test_environment_default_is_server_owned_frozen_and_hidden(event_env: TestCl
     assert capability.json()["platform_default"]["available"] is True
     assert capability.json()["platform_default"]["model_id"] == "platform-frozen-model"
     assert config.LLM_API_KEY not in capability.text
-    assert repo.list_profiles() == []
+    assert len(repo.list_profiles()) == 1
 
     created = client.post("/api/bt/event-experiments", json=_payload(client))
     assert created.status_code == 201, created.text
@@ -73,12 +85,14 @@ def test_environment_default_is_server_owned_frozen_and_hidden(event_env: TestCl
     assert resolve_profile_secret(snapshot) == config.LLM_API_KEY
     assert config.LLM_API_KEY not in created.text
     assert "secret_env_ref" not in created.text
-    assert client.get("/api/model-lab/profiles").json()["items"] == []
+    assert len(client.get("/api/model-lab/profiles").json()["items"]) == 1
+    from app.model_lab.platform_default import environment_profile
+    reserved_id = environment_profile()["id"]
     for action in (
-        client.get(f"/api/model-lab/profiles/{snapshot['id']}"),
-        client.patch(f"/api/model-lab/profiles/{snapshot['id']}", json={"model_id": "tampered"}),
-        client.delete(f"/api/model-lab/profiles/{snapshot['id']}"),
-        client.post(f"/api/model-lab/profiles/{snapshot['id']}/set-default"),
+        client.get(f"/api/model-lab/profiles/{reserved_id}"),
+        client.patch(f"/api/model-lab/profiles/{reserved_id}", json={"model_id": "tampered"}),
+        client.delete(f"/api/model-lab/profiles/{reserved_id}"),
+        client.post(f"/api/model-lab/profiles/{reserved_id}/set-default"),
     ):
         assert action.status_code == 404, action.text
     with db._lock:
@@ -188,7 +202,7 @@ def test_invalid_optional_qa_or_prediction_creates_no_experiment_state(event_env
     assert "pasted-sensitive-input" not in response.text
     with db._lock:
         for table in ("bt_runs", "ml_batches", "ml_tasks", "ml_event_experiments", "ml_model_profiles"):
-            assert db._get_conn().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0, table
+            assert db._get_conn().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == (1 if table == "ml_model_profiles" else 0), table
 
 
 def test_atomic_event_creation_rolls_back_run_and_platform_identity(event_env: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -204,7 +218,7 @@ def test_atomic_event_creation_rolls_back_run_and_platform_identity(event_env: T
         event_env.post("/api/bt/event-experiments", json=payload)
     with db._lock:
         for table in ("bt_runs", "ml_batches", "ml_model_profiles", "ml_event_experiments"):
-            assert db._get_conn().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+            assert db._get_conn().execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == (1 if table == "ml_model_profiles" else 0)
 
 
 def test_auto_start_publish_window_cannot_be_deleted(event_env: TestClient, monkeypatch: pytest.MonkeyPatch):
@@ -325,6 +339,7 @@ def test_external_decision_endpoint_needs_separate_qa_profile(event_env: TestCli
     assert rejected.status_code == 422, rejected.text
     assert "明确选择独立模型" in rejected.text
     payload["qa"]["candidate_profile_id"] = _profile(client)["id"]
+    _verified_service(payload["prediction"]["strategy_spec"]["endpoint"])
     accepted = client.post("/api/bt/event-experiments", json=payload)
     assert accepted.status_code == 201, accepted.text
     assert accepted.json()["run"]["runner"] == "event_external_http"
@@ -345,7 +360,7 @@ def test_explicit_raw_profile_is_frozen_without_modifying_platform_default(event
     run = db.get_bt_run(data["run"]["id"])
     assert run["config"]["model_profile_snapshot"]["id"] == selected["id"]
     assert run["model_version"] == selected["model_id"]
-    assert repo.get_default_profile_id() is None
+    assert repo.get_default_profile_id() != selected["id"]
     detail = client.get(f"/api/model-lab/backtest-runs/{run['id']}/results").json()
     assert detail == {"enabled": False, "batch_id": None, "results": None}
 
@@ -420,6 +435,7 @@ def test_private_http_is_only_enabled_by_existing_admin_opt_in(event_env: TestCl
     assert client.get("/api/model-lab/event-capabilities").json()["allow_private_model_endpoints"] is False
     assert client.post("/api/bt/event-experiments", json=payload).status_code == 422
     monkeypatch.setenv("PRONOIA_ALLOW_PRIVATE_MODEL_ENDPOINTS", "1")
+    _verified_service(payload["prediction"]["strategy_spec"]["endpoint"])
     assert client.get("/api/model-lab/event-capabilities").json()["allow_private_model_endpoints"] is True
     accepted = client.post("/api/bt/event-experiments", json=payload)
     assert accepted.status_code == 201, accepted.text

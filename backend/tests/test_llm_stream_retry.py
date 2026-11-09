@@ -50,6 +50,18 @@ class _Completions:
 
 
 class LlmStreamRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_disabled_timeout_still_closes_stream(self):
+        closed = []
+        class Stream(_CompletedStream):
+            async def close(self):
+                closed.append(True)
+        target = llm.LLMRuntimeTarget("https://fixture.invalid/v1", "synthetic", "test", 0)
+        with patch.object(llm, "resolve_runtime_target", return_value=target):
+            chunks = [chunk async for chunk in llm._stream_with_hard_timeout(Stream())]
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0].choices[0].delta.content, "重试成功")
+        self.assertEqual(closed, [True])
+
     async def test_remote_protocol_error_retries_once(self):
         completions = _Completions()
         client = SimpleNamespace(
@@ -81,7 +93,8 @@ class LlmStreamRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completions.calls, 2)
         self.assertEqual(seen_tool_scopes, [[]])
         self.assertEqual(state["content"], "重试成功")
-        self.assertEqual(events[-1]["delta"], "重试成功")
+        self.assertEqual([e["delta"] for e in events if e["type"] == "token"], ["重试成功"])
+        self.assertEqual(events[-1]["status"], "completed")
 
 
 if __name__ == "__main__":
