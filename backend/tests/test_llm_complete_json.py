@@ -38,6 +38,12 @@ class _StatusError(Exception):
 
 
 class TestCompleteJsonCompatibility(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        target = llm_mod.LLMRuntimeTarget(base_url="https://model.fixture.invalid/v1", api_key="synthetic-json-key", model_id=llm_mod.config.LLM_MODEL, timeout_seconds=180)
+        mocked = patch.object(llm_mod, "resolve_runtime_target", return_value=target)
+        mocked.start()
+        self.addCleanup(mocked.stop)
+
     async def test_adds_english_json_instruction_without_mutating_business_prompts(self):
         system = "你是事件判断器。只能根据冻结事件内容判断方向。"
         user = "事件：示例公司发布公告；内部标记=do-not-log-this-marker"

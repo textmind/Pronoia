@@ -71,6 +71,7 @@ backtesting/*.csv
 backtesting/*.json
 backtesting/*.png
 backtesting/*.svg
+backtesting/self_evolving/
 backtesting/rlvr/**/*.jsonl
 backtesting/rlvr/**/*.csv
 backtesting/rlvr/**/*.json
@@ -81,6 +82,9 @@ backtesting/rlvr/**/*.html
 archive/
 
 # Runtime pids / logs
+.prospective-job-logs/
+/data/evomap_*/
+/backtesting/evomap/
 .run/
 .pronoia-launcher/
 .pronoia-state/

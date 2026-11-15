@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 from app.event_backtest import engine, orchestrator
 from app.event_backtest.models import EventRecord
+from app.evolution.runtime import evolution_context
 
 
 def _event() -> EventRecord:
@@ -60,6 +61,47 @@ def test_team_full_emits_all_observable_stages_without_changing_prediction(tmp_p
     assert prediction.pred_direction == "up"
     assert prediction.confidence == 0.70
     assert prediction.abstain is False
+
+
+def test_bounded_team_full_keeps_all_stages_and_passes_cost_profile(tmp_path):
+    captured={}
+    async def fake_run_team(question, *, state, **kwargs):
+        captured.update(question=question,kwargs=kwargs)
+        state['content']=("【预测状态】 available\n【最终方向】 down\n【置信度】 0.60\n"
+                          "【中文理由】\n事前证据偏空。\n【预期收益率】 null")
+        yield {'type':'done'}
+    with patch('app.agents.team.run_team',new=fake_run_team):
+        prediction=asyncio.run(engine.run_team_full_one_event(
+            _event(),run_id='bounded-run',model_version='fake-model',trajectory_ckpt_dir=tmp_path,
+            bounded_full=True))
+    assert captured['kwargs']['bounded_full'] is True
+    assert captured['kwargs']['team_members']==['fundamentals_analyst','deep_researcher']
+    assert 'skip_verify' not in captured['kwargs'] and 'skip_hypothesis' not in captured['kwargs']
+    assert 'plan → 专家研究 → deep researcher 证据图 → synthesize → verify → extract hypotheses' in captured['question']
+    assert prediction.pred_direction=='down' and prediction.abstain is False
+
+
+def test_bounded_team_full_receives_task_local_gene_context(tmp_path):
+    captured = {}
+
+    async def fake_run_team(question, *, state, **kwargs):
+        captured["question"] = question
+        state["content"] = "【预测状态】 available\n【最终方向】 up\n【置信度】 0.60\n【中文理由】 gene"
+        yield {"type": "done"}
+
+    with patch("app.agents.team.run_team", new=fake_run_team):
+        with evolution_context(
+            [{"id": "gene_test", "asset_id": "sha256:" + "a" * 64,
+              "strategy": ["保留事前证据边界"]}],
+            task_id="gene-context-test",
+        ):
+            prediction = asyncio.run(engine.run_team_full_one_event(
+                _event(), run_id="gene-context-run", model_version="fake-model",
+                trajectory_ckpt_dir=tmp_path, bounded_full=True,
+            ))
+    assert "gene_test" in captured["question"]
+    assert "保留事前证据边界" in captured["question"]
+    assert prediction.pred_direction == "up"
 
 
 def test_runtime_activity_snapshot_and_arena_redaction():

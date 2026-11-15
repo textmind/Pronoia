@@ -81,7 +81,8 @@ class LlmStreamRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(completions.calls, 2)
         self.assertEqual(seen_tool_scopes, [[]])
         self.assertEqual(state["content"], "重试成功")
-        self.assertEqual(events[-1]["delta"], "重试成功")
+        self.assertEqual([e["delta"] for e in events if e["type"] == "token"], ["重试成功"])
+        self.assertEqual(events[-1]["status"], "completed")
 
 
 if __name__ == "__main__":

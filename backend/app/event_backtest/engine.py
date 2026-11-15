@@ -291,10 +291,19 @@ async def run_team_prompt(
     system_prompt_variant: str = "v0",
     on_pred_callback: Optional[Callable[[TeamPrediction], None]] = None,
     target_horizon: str = "t3",
+    rubric_rules: list[dict] | None = None,
+    rubric_version: str | None = None,
 ) -> list[TeamPrediction]:
     from .evaluation_protocol import normalize_evaluation_horizon
 
     selected_horizon = normalize_evaluation_horizon(target_horizon)
+    # An experiment passes a frozen rule payload, not a mutable global prompt.
+    if rubric_rules is not None:
+        if selected_horizon != "t3":
+            raise ValueError("rule evolution v1 is frozen to t3")
+        from .evolution.rubric import validate_rules
+        rubric_rules = json.loads(json.dumps(rubric_rules, ensure_ascii=False))
+        validate_rules(rubric_rules)
     sem = asyncio.Semaphore(max(1, int(concurrency or 1)))
     skip = skip_event_ids or set()
     _rl_next_start: list[float] = [0.0]
@@ -342,7 +351,10 @@ async def run_team_prompt(
             if effective_variant == _v and any(t in _event_type_l2 for t in ["earn", "guid", "业绩", "财报", "预", "profit", "alert"]) and not _title_kw_earn_cn:
                 effective_variant = "v0"
 
-        eff_system = _build_system_prompt(effective_variant, target_horizon=selected_horizon)
+        eff_system = _build_system_prompt(effective_variant, target_horizon=selected_horizon,
+                                          rubric_rules=rubric_rules)
+        from ..evolution.runtime import prompt_context
+        eff_system += prompt_context(include_strategies=False)
         async with sem:
             completion = await _complete_event_json(
                 eff_system,
@@ -371,6 +383,14 @@ async def run_team_prompt(
             # Legacy flat key retained for existing clients.
             "output_validation_errors": list(invalid_output_reasons),
         })
+        if rubric_rules is not None:
+            from .evolution.rubric import audit_output, digest
+            diagnostic_meta.update({
+                "rubric_version": rubric_version,
+                "rubric_hash": digest(rubric_rules),
+                "rule_audit": audit_output(obj or {}, rubric_rules,
+                                            json.loads(_event_prompt(event, target_horizon=selected_horizon))),
+            })
         usage = completion.usage
         pred = TeamPrediction(
             event_id=event.event_id,
@@ -474,13 +494,19 @@ SYSTEM_PROMPT_V5_CN_CALIB = SYSTEM_PROMPT_V7_UNIFIED
 SYSTEM_PROMPT_V6_CN_CALIB = SYSTEM_PROMPT_V7_UNIFIED
 
 
-def _build_system_prompt(variant: str, *, target_horizon: str = "t3") -> str:
+def _build_system_prompt(variant: str, *, target_horizon: str = "t3",
+                         rubric_rules: list[dict] | None = None) -> str:
     # V7 统一 prompt：所有 variant 走同一套软先验 + 评分卡逻辑。
     # The catalog remains T+3 by default, while each frozen run substitutes its
     # selected numeric horizon so the model and Oracle score the same question.
     from .evaluation_protocol import normalize_evaluation_horizon
 
     selected = normalize_evaluation_horizon(target_horizon)
+    if rubric_rules is not None:
+        if selected != "t3":
+            raise ValueError("rule evolution v1 is frozen to t3")
+        from .evolution.rubric import render
+        return render(rubric_rules)
     days = int(selected[1:])
     return SYSTEM_PROMPT_V7_UNIFIED.replace(
         "评估窗口 T+3（事件后3个交易日）",
@@ -572,6 +598,7 @@ async def run_team_full_one_event(
     trajectory_ckpt_dir: str | Path,
     system_prompt_variant: str = "v0",
     target_horizon: str = "t3",
+    bounded_full: bool = False,
     on_stage_callback: Optional[Callable[[dict], None]] = None,
 ):
     """
@@ -624,6 +651,27 @@ async def run_team_full_one_event(
         target_horizon_label=f"T+{target_horizon_days}",
         target_horizon_days=target_horizon_days,
     )
+    if bounded_full:
+        question = f"""你执行严格事前事件回测，必须完成 plan → 专家研究 → deep researcher 证据图 → synthesize → verify → extract hypotheses 全流程。
+只能使用下列 as_of_packet 和允许的本地事前工具；禁止联网、未来信息、事件后收益与 CAR。
+目标：预测 T+{target_horizon_days} benchmark-relative CAR 方向。资料充分只能输出 up/down；关键事实缺失才输出 insufficient_data。
+量化证据优先于软先验；逐条区分事实、推断与缺口。历史案例只能类比，不能当作当前结果。
+最终回答必须包含：
+【预测状态】available 或 insufficient_data
+【最终方向】up/down；不足时 null
+【置信度】0到1；不足时 null
+【中文理由】不超过300字，引用 packet 证据
+【预期收益率】数值或 null
+
+event_id={eid} market={market} symbol={symbol} event_time={event_time} benchmark={benchmark}
+as_of_packet={packet}
+run_id={run_id}"""
+
+    # Full team runs share the same task-local EvoMap context as the
+    # structured prompt runner.  Append after the bounded prompt is selected
+    # so the context is retained in both normal and replay modes.
+    from ..evolution.runtime import prompt_context
+    question += prompt_context(include_strategies=True)
 
     import os as _os
     FAST = _os.environ.get("PRONOIA_BT_FAST", "").strip() in ("1", "true", "yes")
@@ -688,29 +736,44 @@ async def run_team_full_one_event(
     team_kwargs: dict = {
         "skill_allowlist": STRICT_BACKTEST_SKILL_ALLOWLIST,
     }
-    if FAST:
-        team_kwargs["team_members"] = [
-            "market_analyst", "fundamentals_analyst", "deep_researcher",
-        ]
+    if FAST or bounded_full:
+        team_kwargs["team_members"] = (
+            ["fundamentals_analyst", "deep_researcher"]
+            if bounded_full else
+            ["market_analyst", "fundamentals_analyst", "deep_researcher"]
+        )
         # hypothesis/verify 均不影响 ACC 计算：
         # - hypothesis 只产出 logic_items 事件，不进入 state['content']
         # - verify 不改变事实结论（仅附加修正），但在严格 as-of 回测里专家已经做了核查
-        team_kwargs["skip_hypothesis"] = True
-        team_kwargs["skip_verify"] = True
-        preamble = (
-            f"\n\n【回测上下文 - STRICT AS-OF 模式 - 禁止未来函数】"
-            f"\n- 标的市场：{market}，代码：{symbol}"
-            f"\n- 对比基准（benchmark）：{benchmark}"
-            f"\n- 事件类型：{event_type_l2}"
-            f"\n- 事件时间：{event_time}"
-            f"\n- as_of_packet 已经包含事件原文（标题和正文），做事件研究时用 event_study_skill"
-            f"  （event_date={str(event_time)[:10]}, symbol={symbol}, window_days=20, benchmark={benchmark}, **as_of=True**）。"
-            f"\n  ⚠️  **as_of=True 时 event_study_skill 仅返回事件日前一交易日收盘及更早数据**（pre5/pre20 漂移），"
-            f"绝不包含任何事件后未来 CAR；禁止引用/推断任何 post-event 收益或 CAR。"
-            f"\n  ⚠️  你的方向判断必须**仅基于 as_of_packet 公告正文（基本面语义）+ 前一交易日收盘前可得行情信号**"
-            f"（pre5/pre20 漂移），做前瞻预判；禁止使用/提及 T0 当日涨跌、post3_car_endpoint_pct / post5_cum_return 等未来字段。"
-            f"\n- 检索新闻/公告：信息已在 as_of_packet，不需要再联网查同类事件历史。"
-        )
+        if FAST:
+            team_kwargs["skip_hypothesis"] = True
+            team_kwargs["skip_verify"] = True
+        if bounded_full:
+            team_kwargs["bounded_full"] = True
+        if bounded_full:
+            preamble = (
+                f"\n\n【回测上下文 - STRICT AS-OF 模式 - 禁止未来函数】"
+                f"\n- 标的市场：{market}，代码：{symbol}，基准：{benchmark}，事件时间：{event_time}。"
+                "\n- as_of_packet 已包含唯一允许使用的公告原文和事前特征；这些字段是可直接引用的冻结证据。"
+                "\n- 基本面专家只分析 packet；deep_researcher 只把已有发现写入 evidence_graph，"
+                "不得请求 event_study、stock_overview、联网或其他数据工具。"
+                "\n- 禁止使用或推断 T0 当日及事件后收益、CAR 或任何未来字段。"
+            )
+        else:
+            preamble = (
+                f"\n\n【回测上下文 - STRICT AS-OF 模式 - 禁止未来函数】"
+                f"\n- 标的市场：{market}，代码：{symbol}"
+                f"\n- 对比基准（benchmark）：{benchmark}"
+                f"\n- 事件类型：{event_type_l2}"
+                f"\n- 事件时间：{event_time}"
+                f"\n- as_of_packet 已经包含事件原文（标题和正文），做事件研究时用 event_study_skill"
+                f"  （event_date={str(event_time)[:10]}, symbol={symbol}, window_days=20, benchmark={benchmark}, **as_of=True**）。"
+                f"\n  ⚠️  **as_of=True 时 event_study_skill 仅返回事件日前一交易日收盘及更早数据**（pre5/pre20 漂移），"
+                f"绝不包含任何事件后未来 CAR；禁止引用/推断任何 post-event 收益或 CAR。"
+                f"\n  ⚠️  你的方向判断必须**仅基于 as_of_packet 公告正文（基本面语义）+ 前一交易日收盘前可得行情信号**"
+                f"（pre5/pre20 漂移），做前瞻预判；禁止使用/提及 T0 当日涨跌、post3_car_endpoint_pct / post5_cum_return 等未来字段。"
+                f"\n- 检索新闻/公告：信息已在 as_of_packet，不需要再联网查同类事件历史。"
+            )
         question = question + preamble
 
     # 事件元信息，用于 Synthesize 阶段路由到对应 Tier 1 analyzer skill
@@ -724,6 +787,9 @@ async def run_team_full_one_event(
         "occurred_at": str(getattr(event, "occurred_at", None) or ""),
         "title": getattr(event, "title", ""),
         "event_text": getattr(event, "event_text", ""),
+        "pre_event_features": sanitize_pre_event_features(
+            getattr(event, "pre_event_features", {}) or {}
+        ),
     }
 
     _emit_stage("planning", "规划", 1, "正在拆解事件并规划专家分工", agent="router")
@@ -827,7 +893,10 @@ async def run_team_full_one_event(
             except Exception:
                 confidence = None
 
-    m3 = re.search(r"[【\[]\s*中文理由\s*[】\]]((?:[^\n]+\n?){1,3})", final_txt)
+    m3 = re.search(
+        r"[【\[]\s*中文理由\s*[】\]][ \t]*(?:\n[ \t]*)?((?:[^\n]+\n?){1,3})",
+        final_txt,
+    )
     if m3:
         rationale = re.sub(r"\s+", " ", m3.group(1)).strip()[:800]
     if not rationale:
