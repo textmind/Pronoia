@@ -15,6 +15,14 @@ Pronoia 是开源的对话式金融研究工作台：主理人 Agent 调用真�
 深度问题可切换「研究团队」模式，多专家 Agent 并行作业、复核员把关。
 内置事件驱动回测平台，用真实事件 + 真实行情量化评估 Tool / Skill / Agent / Team 四层的方向命中率。
 
+## 官网与交流
+
+[Pronoia 官网](https://pronoia-research.com/)
+
+使用微信扫描下方二维码，加入「Pronoia 金融投研产品交流群」。本二维码在 2026 年 12 月 4 日前有效。
+
+<img src="docs/images/pronoia-wechat-group.jpg" alt="Pronoia 金融投研产品交流群二维码" width="360">
+
 ## 核心能力
 
 - **对话式研究工作台**：Case 持久化（SQLite），刷新不丢，随时回看与追问
