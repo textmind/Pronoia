@@ -6,6 +6,8 @@
 
 > **Hunt events. Trace echoes.** — 对话式 AI 金融事件分析工作台：提问即研究。
 
+[Pronoia 官网](https://pronoia-research.com/)
+
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.10+-blue.svg)]()
 [![React](https://img.shields.io/badge/React-18-61dafb.svg)]()
@@ -14,6 +16,12 @@ Pronoia 是开源的对话式金融研究工作台：主理人 Agent 调用真�
 流式输出结论，并把 K 线、事件研究曲线、数据表与研究报告沉淀为可回看的研究资产。
 深度问题可切换「研究团队」模式，多专家 Agent 并行作业、复核员把关。
 内置事件驱动回测平台，用真实事件 + 真实行情量化评估 Tool / Skill / Agent / Team 四层的方向命中率。
+
+## 微信交流群
+
+使用微信扫描下方二维码，加入「Pronoia 金融投研产品交流群」。本二维码在 2026 年 12 月 4 日前有效。
+
+<img src="docs/images/pronoia-wechat-group.jpg" alt="Pronoia 金融投研产品交流群二维码" width="360">
 
 ## 核心能力
 
